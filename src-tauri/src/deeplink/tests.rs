@@ -94,6 +94,76 @@ fn test_parse_valid_claude_desktop_deeplink() {
 }
 
 #[test]
+fn claude_desktop_import_builds_direct_routes_from_link_models() {
+    use super::provider::build_provider_from_request;
+
+    let request = parse_deeplink_url(
+        "ccswitch://v1/import?resource=provider&app=claude-desktop&name=Claude%20Desktop&homepage=https%3A%2F%2Fexample.com&endpoint=https%3A%2F%2Fapi.example.com&apiKey=test-api-key&model=claude-fable-5%5B1M%5D&sonnetModel=claude-sonnet-5&opusModel=claude-opus-4-8",
+    )
+    .unwrap();
+
+    let provider = build_provider_from_request(&AppType::ClaudeDesktop, &request).unwrap();
+    let routes = &provider
+        .meta
+        .as_ref()
+        .expect("Claude Desktop providers should have metadata")
+        .claude_desktop_model_routes;
+
+    assert_eq!(routes["claude-fable-5"].model, "claude-fable-5");
+    assert_eq!(routes["claude-fable-5"].supports_1m, Some(true));
+    assert_eq!(routes["claude-sonnet-5"].model, "claude-sonnet-5");
+    assert_eq!(routes["claude-opus-4-8"].model, "claude-opus-4-8");
+}
+
+#[test]
+fn claude_desktop_exported_routes_preserve_multiple_models_in_one_role() {
+    use super::provider::build_provider_from_request;
+
+    let config_json = r#"{
+        "env": {
+            "ANTHROPIC_AUTH_TOKEN": "test-api-key",
+            "ANTHROPIC_BASE_URL": "https://api.example.com/v1"
+        },
+        "claudeDesktopModelRoutes": {
+            "claude-sonnet-4-6": {
+                "model": "claude-sonnet-4-6",
+                "labelOverride": "Sonnet 4.6",
+                "supports1m": true
+            },
+            "claude-sonnet-5": {
+                "model": "claude-sonnet-5",
+                "labelOverride": "Sonnet 5"
+            }
+        }
+    }"#;
+    let request = DeepLinkImportRequest {
+        version: "v1".to_string(),
+        resource: "provider".to_string(),
+        app: Some("claude-desktop".to_string()),
+        name: Some("Claude Desktop".to_string()),
+        config: Some(BASE64_STANDARD.encode(config_json.as_bytes())),
+        config_format: Some("json".to_string()),
+        ..Default::default()
+    };
+
+    let provider = build_provider_from_request(&AppType::ClaudeDesktop, &request).unwrap();
+    let routes = &provider
+        .meta
+        .as_ref()
+        .expect("Claude Desktop providers should have metadata")
+        .claude_desktop_model_routes;
+
+    assert_eq!(routes.len(), 2);
+    assert_eq!(routes["claude-sonnet-4-6"].model, "claude-sonnet-4-6");
+    assert_eq!(
+        routes["claude-sonnet-4-6"].label_override.as_deref(),
+        Some("Sonnet 4.6")
+    );
+    assert_eq!(routes["claude-sonnet-4-6"].supports_1m, Some(true));
+    assert_eq!(routes["claude-sonnet-5"].model, "claude-sonnet-5");
+}
+
+#[test]
 fn test_parse_deeplink_with_notes() {
     let url = "ccswitch://v1/import?resource=provider&app=codex&name=Codex&homepage=https%3A%2F%2Fcodex.com&endpoint=https%3A%2F%2Fapi.codex.com&apiKey=key123&notes=Test%20notes";
 
@@ -616,6 +686,29 @@ fn test_parse_and_merge_config_claude_desktop() {
         Some("https://api.anthropic.com/v1")
     );
     assert_eq!(merged.model.as_deref(), Some("claude-sonnet-4.5"));
+}
+
+#[test]
+fn claude_config_with_api_key_keeps_its_auth_field() {
+    use super::provider::build_provider_from_request;
+
+    let config_json = r#"{"env":{"ANTHROPIC_API_KEY":"test-x-api-key","ANTHROPIC_BASE_URL":"https://api.example.com/v1"}}"#;
+    let request = DeepLinkImportRequest {
+        version: "v1".to_string(),
+        resource: "provider".to_string(),
+        app: Some("claude".to_string()),
+        name: Some("Claude API Key".to_string()),
+        config: Some(BASE64_STANDARD.encode(config_json.as_bytes())),
+        config_format: Some("json".to_string()),
+        ..Default::default()
+    };
+
+    let merged = parse_and_merge_config(&request).unwrap();
+    let provider = build_provider_from_request(&AppType::Claude, &merged).unwrap();
+    let env = provider.settings_config["env"].as_object().unwrap();
+
+    assert_eq!(env["ANTHROPIC_API_KEY"], "test-x-api-key");
+    assert!(env.get("ANTHROPIC_AUTH_TOKEN").is_none());
 }
 
 #[test]

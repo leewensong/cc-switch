@@ -23,6 +23,95 @@ context_window = 500000
 `;
 
 describe("parseDeepLinkConfigPreview", () => {
+  it("shows every exported Claude Desktop direct model route", () => {
+    const preview = parseDeepLinkConfigPreview({
+      app: "claude-desktop",
+      config: encodeBase64(
+        JSON.stringify({
+          env: { ANTHROPIC_BASE_URL: "https://api.example.com/v1" },
+          claudeDesktopModelRoutes: {
+            "claude-sonnet-4-6": {
+              model: "claude-sonnet-4-6",
+              labelOverride: "Sonnet 4.6",
+              supports1m: true,
+            },
+            "claude-sonnet-5": { model: "claude-sonnet-5" },
+          },
+        }),
+      ),
+      configFormat: "json",
+    });
+
+    expect(preview?.claudeDesktopModelRoutes).toEqual([
+      {
+        routeId: "claude-sonnet-4-6",
+        labelOverride: "Sonnet 4.6",
+        supports1m: true,
+      },
+      { routeId: "claude-sonnet-5" },
+    ]);
+  });
+
+  it("shows the same accepted Desktop routes as the importer", () => {
+    const ignoredRoutes = Object.fromEntries(
+      Array.from({ length: 64 }, (_, index) => [
+        `not-a-claude-route-${index}`,
+        { model: `not-a-claude-route-${index}` },
+      ]),
+    );
+    const preview = parseDeepLinkConfigPreview({
+      app: "claude-desktop",
+      config: encodeBase64(
+        JSON.stringify({
+          env: {},
+          claudeDesktopModelRoutes: {
+            ...ignoredRoutes,
+            "claude-opus-4-8": {
+              model: "ignored-by-importer",
+              labelOverride: "unsafe\nlabel",
+              supports1m: true,
+            },
+          },
+        }),
+      ),
+      configFormat: "json",
+    });
+
+    expect(preview?.claudeDesktopModelRoutes).toEqual([
+      { routeId: "claude-opus-4-8", supports1m: true },
+    ]);
+  });
+
+  it("deduplicates trimmed route IDs before applying the importer limit", () => {
+    const duplicateRoutes = Object.fromEntries(
+      Array.from({ length: 64 }, (_, index) => [
+        `${" ".repeat(index + 1)}claude-sonnet-4-6`,
+        {
+          model: "ignored-by-importer",
+          labelOverride: `Sonnet ${index}`,
+        },
+      ]),
+    );
+    const preview = parseDeepLinkConfigPreview({
+      app: "claude-desktop",
+      config: encodeBase64(
+        JSON.stringify({
+          env: {},
+          claudeDesktopModelRoutes: {
+            ...duplicateRoutes,
+            "claude-opus-4-8": { model: "claude-opus-4-8" },
+          },
+        }),
+      ),
+      configFormat: "json",
+    });
+
+    expect(preview?.claudeDesktopModelRoutes).toEqual([
+      { routeId: "claude-sonnet-4-6", labelOverride: "Sonnet 63" },
+      { routeId: "claude-opus-4-8" },
+    ]);
+  });
+
   it("previews direct Grok Build TOML and masks its API key", () => {
     const preview = parseDeepLinkConfigPreview({
       app: "grokbuild",

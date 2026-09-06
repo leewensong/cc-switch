@@ -8,6 +8,11 @@ export interface ParsedDeepLinkConfig {
   env?: Record<string, string>;
   auth?: Record<string, string>;
   tomlConfig?: string;
+  claudeDesktopModelRoutes?: Array<{
+    routeId: string;
+    labelOverride?: string;
+    supports1m?: boolean;
+  }>;
 }
 
 const maskStructuredSecrets = (
@@ -40,6 +45,78 @@ const sanitizeTomlForPreview = (configToml: string): string => {
   return `${stringifyToml(maskStructuredSecrets(parsed) as Record<string, unknown>).trim()}\n`;
 };
 
+const isClaudeDesktopSafeRouteId = (value: string): boolean => {
+  const normalized = value.trim().toLowerCase();
+  if (normalized.includes("[1m]")) return false;
+
+  const routeTail = normalized.startsWith("anthropic/claude-")
+    ? normalized.slice("anthropic/claude-".length)
+    : normalized.startsWith("claude-")
+      ? normalized.slice("claude-".length)
+      : undefined;
+  return Boolean(
+    routeTail &&
+      ["sonnet-", "opus-", "haiku-", "fable-"].some(
+        (role) => routeTail.startsWith(role) && routeTail.length > role.length,
+      ),
+  );
+};
+
+const hasControlCharacter = (value: string) =>
+  Array.from(value).some((character) => {
+    const code = character.codePointAt(0) ?? 0;
+    return code <= 0x1f || (code >= 0x7f && code <= 0x9f);
+  });
+
+const parseClaudeDesktopModelRoutes = (
+  value: unknown,
+): ParsedDeepLinkConfig["claudeDesktopModelRoutes"] => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const routes = new Map<
+    string,
+    NonNullable<ParsedDeepLinkConfig["claudeDesktopModelRoutes"]>[number]
+  >();
+  for (const [rawRouteId, rawRoute] of Object.entries(
+    value as Record<string, unknown>,
+  )) {
+    if (routes.size >= 64) break;
+
+    const routeId = rawRouteId.trim();
+    if (
+      !isClaudeDesktopSafeRouteId(routeId) ||
+      !rawRoute ||
+      typeof rawRoute !== "object" ||
+      Array.isArray(rawRoute)
+    ) {
+      continue;
+    }
+
+    const route = rawRoute as Record<string, unknown>;
+    const rawLabel =
+      typeof route.labelOverride === "string"
+        ? route.labelOverride.trim()
+        : undefined;
+    const labelOverride =
+      rawLabel &&
+      Array.from(rawLabel).length <= 256 &&
+      !hasControlCharacter(rawLabel)
+        ? rawLabel
+        : undefined;
+    routes.set(routeId, {
+      routeId,
+      ...(labelOverride ? { labelOverride } : {}),
+      ...(typeof route.supports1m === "boolean"
+        ? { supports1m: route.supports1m }
+        : {}),
+    });
+  }
+
+  return routes.size > 0 ? Array.from(routes.values()) : undefined;
+};
+
 export function parseDeepLinkConfigPreview(
   request: Pick<DeepLinkImportRequest, "app" | "config" | "configFormat">,
 ): ParsedDeepLinkConfig | null {
@@ -57,10 +134,17 @@ export function parseDeepLinkConfigPreview(
     }
 
     const parsed = JSON.parse(decoded) as Record<string, unknown>;
-    if (request.app === "claude") {
+    if (request.app === "claude" || request.app === "claude-desktop") {
       return {
         type: "claude",
         env: (parsed.env as Record<string, string>) || {},
+        ...(request.app === "claude-desktop"
+          ? {
+              claudeDesktopModelRoutes: parseClaudeDesktopModelRoutes(
+                parsed.claudeDesktopModelRoutes,
+              ),
+            }
+          : {}),
       };
     }
     if (request.app === "codex") {

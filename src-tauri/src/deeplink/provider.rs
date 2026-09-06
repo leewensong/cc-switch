@@ -5,12 +5,14 @@
 use super::utils::{decode_base64_param, infer_homepage_from_endpoint};
 use super::DeepLinkImportRequest;
 use crate::error::AppError;
-use crate::provider::{ClaudeDesktopMode, Provider, ProviderMeta, UsageScript};
+use crate::provider::{
+    ClaudeDesktopMode, ClaudeDesktopModelRoute, Provider, ProviderMeta, UsageScript,
+};
 use crate::services::ProviderService;
 use crate::store::AppState;
 use crate::AppType;
 use serde_json::json;
-use std::str::FromStr;
+use std::{collections::HashMap, str::FromStr};
 
 /// Import a provider from a deep link request
 ///
@@ -109,8 +111,11 @@ pub fn import_provider_from_deeplink(
 
     let provider_id = provider.id.clone();
 
-    // Use ProviderService to add the provider
-    ProviderService::add(state, app_type.clone(), provider, true)?;
+    // A deep link is only allowed to modify the provider database until the
+    // user explicitly opts into activation with `enabled=true`. In particular,
+    // do not let an empty target profile turn an `enabled=false` import into
+    // the current provider as a side effect of adding it.
+    ProviderService::add(state, app_type.clone(), provider, false)?;
 
     // Add extra endpoints as custom endpoints (skip first one as it's the primary)
     for ep in all_endpoints.iter().skip(1) {
@@ -162,8 +167,16 @@ pub(crate) fn build_provider_from_request(
     // Build usage script configuration if provided
     let mut meta = build_provider_meta(request)?;
     if matches!(app_type, AppType::ClaudeDesktop) {
-        meta.get_or_insert_with(ProviderMeta::default)
-            .claude_desktop_mode = Some(ClaudeDesktopMode::Direct);
+        let desktop_meta = meta.get_or_insert_with(ProviderMeta::default);
+        desktop_meta.claude_desktop_mode = Some(ClaudeDesktopMode::Direct);
+        if desktop_meta.claude_desktop_model_routes.is_empty() {
+            let exported_routes = extract_claude_desktop_direct_routes(request);
+            desktop_meta.claude_desktop_model_routes = if exported_routes.is_empty() {
+                build_claude_desktop_direct_routes(&settings_config)
+            } else {
+                exported_routes
+            };
+        }
     }
 
     let provider = Provider {
@@ -312,10 +325,27 @@ fn build_claude_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
 
     // Now overwrite / fill in the standard fields from URL params. URL params
     // are authoritative because they're what the deeplink builder put on the
-    // wire — for Claude these are: ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL,
+    // wire — for Claude these are: the credential, ANTHROPIC_BASE_URL,
     // ANTHROPIC_MODEL, and the haiku/sonnet/opus model aliases.
+    //
+    // Preserve an `ANTHROPIC_API_KEY`-only config instead of injecting a
+    // second credential under `ANTHROPIC_AUTH_TOKEN`: these fields select
+    // different upstream auth headers.
+    let has_auth_token = env
+        .get("ANTHROPIC_AUTH_TOKEN")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.trim().is_empty());
+    let has_api_key = env
+        .get("ANTHROPIC_API_KEY")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.trim().is_empty());
+    let credential_field = if has_api_key && !has_auth_token {
+        "ANTHROPIC_API_KEY"
+    } else {
+        "ANTHROPIC_AUTH_TOKEN"
+    };
     env.insert(
-        "ANTHROPIC_AUTH_TOKEN".to_string(),
+        credential_field.to_string(),
         json!(request.api_key.clone().unwrap_or_default()),
     );
     env.insert(
@@ -349,6 +379,85 @@ fn build_claude_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
     }
 
     json!({ "env": env })
+}
+
+/// Rebuild Claude Desktop's direct-mode model list from standard deep-link
+/// model parameters. This keeps legacy links (which only carry `model` /
+/// `haikuModel` / `sonnetModel` / `opusModel`) usable in the Desktop profile,
+/// whose live configuration reads model routes from provider metadata.
+fn build_claude_desktop_direct_routes(
+    settings_config: &serde_json::Value,
+) -> HashMap<String, ClaudeDesktopModelRoute> {
+    let Some(env) = settings_config
+        .get("env")
+        .and_then(|value| value.as_object())
+    else {
+        return HashMap::new();
+    };
+
+    let mut routes = HashMap::new();
+    for (model_key, label_key) in [
+        (
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+        ),
+        (
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+        ),
+        (
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+        ),
+        (
+            "ANTHROPIC_DEFAULT_FABLE_MODEL",
+            "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME",
+        ),
+        ("ANTHROPIC_MODEL", ""),
+    ] {
+        let Some(raw_model) = env.get(model_key).and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let (model, supports_1m) = strip_one_m_marker(raw_model);
+        if !crate::claude_desktop_config::is_claude_safe_model_id(model) {
+            continue;
+        }
+
+        let label_override = (!label_key.is_empty())
+            .then(|| env.get(label_key).and_then(|value| value.as_str()))
+            .flatten()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+
+        let route = routes
+            .entry(model.to_string())
+            .or_insert_with(|| ClaudeDesktopModelRoute {
+                model: model.to_string(),
+                label_override: label_override.clone(),
+                supports_1m: supports_1m.then_some(true),
+            });
+        if route.label_override.is_none() {
+            route.label_override = label_override;
+        }
+        if supports_1m {
+            route.supports_1m = Some(true);
+        }
+    }
+
+    routes
+}
+
+fn strip_one_m_marker(value: &str) -> (&str, bool) {
+    let trimmed = value.trim();
+    let marker = "[1m]";
+    if trimmed.len() >= marker.len()
+        && trimmed[trimmed.len() - marker.len()..].eq_ignore_ascii_case(marker)
+    {
+        (trimmed[..trimmed.len() - marker.len()].trim_end(), true)
+    } else {
+        (trimmed, false)
+    }
 }
 
 /// Decode and extract the `env` object from the deeplink's inline config payload.
@@ -387,6 +496,85 @@ fn extract_claude_config_env(
 
     // Pull out the env object — same shape as Claude's own settings.json.
     value.get("env").and_then(|v| v.as_object()).cloned()
+}
+
+/// Extract the narrowly-scoped direct-model list written by CC Switch's
+/// provider-link exporter. The importer intentionally ignores every other
+/// metadata field: only valid Claude Desktop route ids, their display label,
+/// and the 1M capability flag are allowed through.
+///
+/// Older links do not have this block and continue to use the standard model
+/// URL parameters via `build_claude_desktop_direct_routes`.
+fn extract_claude_desktop_direct_routes(
+    request: &DeepLinkImportRequest,
+) -> HashMap<String, ClaudeDesktopModelRoute> {
+    const MAX_EXPORTED_ROUTES: usize = 64;
+    const MAX_LABEL_LENGTH: usize = 256;
+
+    let Some(config_b64) = request.config.as_ref() else {
+        return HashMap::new();
+    };
+    if request.config_format.as_deref().unwrap_or("json") != "json" {
+        return HashMap::new();
+    }
+
+    let Ok(decoded) = decode_base64_param("config", config_b64) else {
+        return HashMap::new();
+    };
+    let Ok(json_str) = std::str::from_utf8(&decoded) else {
+        return HashMap::new();
+    };
+    let Ok(config) = serde_json::from_str::<serde_json::Value>(json_str) else {
+        return HashMap::new();
+    };
+    let Some(raw_routes) = config
+        .get("claudeDesktopModelRoutes")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return HashMap::new();
+    };
+
+    let mut routes = HashMap::new();
+    for (raw_route_id, raw_route) in raw_routes {
+        if routes.len() >= MAX_EXPORTED_ROUTES {
+            break;
+        }
+
+        let route_id = raw_route_id.trim();
+        if !crate::claude_desktop_config::is_claude_safe_model_id(route_id) {
+            continue;
+        }
+        let Some(raw_route) = raw_route.as_object() else {
+            continue;
+        };
+
+        let label_override = raw_route
+            .get("labelOverride")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| {
+                !value.is_empty()
+                    && value.chars().count() <= MAX_LABEL_LENGTH
+                    && !value.chars().any(char::is_control)
+            })
+            .map(str::to_string);
+        let supports_1m = raw_route
+            .get("supports1m")
+            .and_then(serde_json::Value::as_bool);
+
+        // Direct mode must not carry an arbitrary upstream mapping. The safe
+        // route ID is authoritative for both sides of the route.
+        routes.insert(
+            route_id.to_string(),
+            ClaudeDesktopModelRoute {
+                model: route_id.to_string(),
+                label_override,
+                supports_1m,
+            },
+        );
+    }
+
+    routes
 }
 
 /// Build Codex settings configuration
@@ -683,7 +871,11 @@ fn merge_claude_config(
 
     // Auto-fill API key if not provided in URL
     if request.api_key.as_ref().is_none_or(|s| s.is_empty()) {
-        if let Some(token) = env.get("ANTHROPIC_AUTH_TOKEN").and_then(|v| v.as_str()) {
+        if let Some(token) = env
+            .get("ANTHROPIC_AUTH_TOKEN")
+            .or_else(|| env.get("ANTHROPIC_API_KEY"))
+            .and_then(|v| v.as_str())
+        {
             request.api_key = Some(token.to_string());
         }
     }

@@ -405,7 +405,8 @@ export function DeepLinkImportDialog() {
                   </div>
 
                   {/* Model Fields - 根据应用类型显示不同的模型字段 */}
-                  {request.app === "claude" ? (
+                  {request.app === "claude" ||
+                  request.app === "claude-desktop" ? (
                     <>
                       {/* Claude 四种模型字段 */}
                       {request.haikuModel && (
@@ -508,15 +509,37 @@ export function DeepLinkImportDialog() {
                           {/* Claude config */}
                           {parsedConfig.type === "claude" &&
                             parsedConfig.env && (
-                              <div className="space-y-1.5">
-                                {Object.entries(parsedConfig.env).map(
-                                  ([key, value]) => (
-                                    <EnvRow
-                                      key={key}
-                                      envKey={key}
-                                      value={String(value)}
-                                    />
-                                  ),
+                              <div className="space-y-2">
+                                <div className="space-y-1.5">
+                                  {Object.entries(parsedConfig.env).map(
+                                    ([key, value]) => (
+                                      <EnvRow
+                                        key={key}
+                                        envKey={key}
+                                        value={String(value)}
+                                      />
+                                    ),
+                                  )}
+                                </div>
+                                {parsedConfig.claudeDesktopModelRoutes && (
+                                  <div className="space-y-1.5 border-t border-border-default pt-2">
+                                    <div className="text-xs text-muted-foreground">
+                                      {t("deeplink.claudeDesktopModels")}
+                                    </div>
+                                    {parsedConfig.claudeDesktopModelRoutes.map(
+                                      (route) => (
+                                        <div
+                                          key={route.routeId}
+                                          className="text-xs font-mono break-all"
+                                        >
+                                          {route.routeId}
+                                          {route.labelOverride &&
+                                            ` (${route.labelOverride})`}
+                                          {route.supports1m && " [1M]"}
+                                        </div>
+                                      ),
+                                    )}
+                                  </div>
                                 )}
                               </div>
                             )}
