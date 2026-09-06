@@ -5,6 +5,7 @@ import {
   ChevronDown,
   Copy,
   Edit,
+  Link,
   Loader2,
   Minus,
   Play,
@@ -41,6 +42,7 @@ interface ProviderActionsProps {
   onSwitch: () => void;
   onEdit: () => void;
   onDuplicate: () => void;
+  onCopyImportLink?: () => void;
   onTest?: () => void;
   onConfigureUsage?: () => void;
   onDelete: () => void;
@@ -83,6 +85,7 @@ export function ProviderActions({
   onSwitch,
   onEdit,
   onDuplicate,
+  onCopyImportLink,
   onTest,
   onConfigureUsage,
   onDelete,
@@ -409,6 +412,22 @@ export function ProviderActions({
         >
           <Copy className="h-4 w-4" />
         </Button>
+
+        {onCopyImportLink && (
+          <Button
+            size="icon"
+            variant="ghost"
+            onClick={onCopyImportLink}
+            aria-label={t("provider.copyImportLink")}
+            title={t("provider.copyImportLink")}
+            className={cn(
+              iconButtonClass,
+              "hover:text-blue-600 dark:hover:text-blue-400",
+            )}
+          >
+            <Link className="h-4 w-4" />
+          </Button>
+        )}
 
         <Button
           size="icon"

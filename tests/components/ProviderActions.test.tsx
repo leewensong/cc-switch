@@ -134,3 +134,28 @@ describe("ProviderActions Pi provider switching", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+describe("ProviderActions import link", () => {
+  it("renders and invokes the copy-import-link action when available", async () => {
+    const user = userEvent.setup();
+    const onCopyImportLink = vi.fn();
+
+    render(
+      <ProviderActions
+        appId="claude-desktop"
+        isCurrent={false}
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDuplicate={vi.fn()}
+        onCopyImportLink={onCopyImportLink}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "provider.copyImportLink" }),
+    );
+
+    expect(onCopyImportLink).toHaveBeenCalledTimes(1);
+  });
+});

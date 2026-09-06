@@ -1,11 +1,21 @@
 import { useMemo, useState, useEffect } from "react";
-import { GripVertical, ChevronDown, ChevronUp } from "lucide-react";
+import {
+  GripVertical,
+  ChevronDown,
+  ChevronUp,
+  Cpu,
+  Layers,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type {
   DraggableAttributes,
   DraggableSyntheticListeners,
 } from "@dnd-kit/core";
-import type { OpenClawProviderConfig, Provider } from "@/types";
+import type {
+  CompositeConfig,
+  OpenClawProviderConfig,
+  Provider,
+} from "@/types";
 import type { AppId } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { ProviderActions } from "@/components/providers/ProviderActions";
@@ -32,6 +42,14 @@ import { useUsageQuery } from "@/lib/query/queries";
 import { resolveProviderIcon } from "@/utils/providerIcon";
 import { ProviderStatusBadge } from "@/components/providers/ProviderStatusBadge";
 import { isAdditiveAppId, isProxyAppId } from "@/config/appConfig";
+import { isLocalProvider } from "@/lib/api/local";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { copyText } from "@/lib/clipboard";
+import { toast } from "sonner";
+import {
+  buildProviderImportLink,
+  ProviderImportLinkError,
+} from "@/utils/providerImportLink";
 
 interface DragHandleProps {
   attributes: DraggableAttributes;
@@ -265,6 +283,17 @@ export function ProviderCard({
     provider.meta?.providerType === PROVIDER_TYPES.CODEX_OAUTH;
   // xAI OAuth (SuperGrok 反代)：额度经自管 OAuth token 自动显示，与 codex_oauth 同构
   const isXaiOauth = provider.meta?.providerType === PROVIDER_TYPES.XAI_OAUTH;
+  const isComposite =
+    provider.meta?.providerType === PROVIDER_TYPES.COMPOSITE;
+  const compositeConfig = isComposite
+    ? ((provider.settingsConfig as Record<string, unknown>)
+        ?.composite as CompositeConfig | undefined)
+    : undefined;
+  const compositeMembers = compositeConfig?.members ?? [];
+  const compositeModelCount = compositeMembers.reduce(
+    (sum, member) => sum + (member.models?.length ?? 0),
+    0,
+  );
   // 统一权威谓词（详见 providerNeedsRouting）：以 providerType 为准，不受
   // apiFormat 被改动/缺省影响。此 badge 仅在 Codex 视图渲染，故加 appId 守卫。
   const codexNeedsRouting =
@@ -276,9 +305,15 @@ export function ProviderCard({
     ? provider.meta?.usage_script?.autoQueryInterval || 0
     : 0;
 
+  // Local 卡片：本地推理不计费，禁用用量查询（本地网关没有 usage 端点）
+  const localUsageDisabled = isLocalProvider(provider);
   const { data: usage } = useUsageQuery(provider.id, appId, {
-    enabled: usageEnabled && !isOfficial && !isOfficialSubscriptionUsage,
-    autoQueryInterval,
+    enabled:
+      usageEnabled &&
+      !isOfficial &&
+      !isOfficialSubscriptionUsage &&
+      !localUsageDisabled,
+    autoQueryInterval: localUsageDisabled ? 0 : autoQueryInterval,
   });
 
   const isTokenPlan =
@@ -287,6 +322,8 @@ export function ProviderCard({
     usage?.success && usage.data && usage.data.length > 1 && !isTokenPlan;
 
   const [isExpanded, setIsExpanded] = useState(false);
+  const [isCopyImportLinkConfirmOpen, setIsCopyImportLinkConfirmOpen] =
+    useState(false);
 
   useEffect(() => {
     if (hasMultiplePlans) {
@@ -300,6 +337,28 @@ export function ProviderCard({
     }
     onOpenWebsite(displayUrl);
   };
+
+  const handleCopyImportLink = async () => {
+    try {
+      await copyText(buildProviderImportLink(appId, provider));
+      toast.success(t("provider.copyImportLinkSuccess"));
+    } catch (error) {
+      const message =
+        error instanceof ProviderImportLinkError
+          ? t(`provider.copyImportLinkErrors.${error.code}`)
+          : t("provider.copyImportLinkErrors.generic");
+      toast.error(message);
+    } finally {
+      setIsCopyImportLinkConfirmOpen(false);
+    }
+  };
+
+  const canCopyImportLink =
+    ["claude", "claude-desktop", "gemini", "codex", "grokbuild"].includes(
+      appId,
+    ) &&
+    !isOfficial &&
+    !isComposite;
 
   // 判断是否是"当前使用中"的供应商
   // - OMO/OMO Slim 供应商：使用 isCurrent
@@ -387,6 +446,40 @@ export function ProviderCard({
               <h3 className="text-base font-semibold leading-none">
                 {provider.name}
               </h3>
+
+              {isLocalProvider(provider) && (
+                <span className="inline-flex items-center gap-1 rounded-md bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
+                  <Cpu className="h-3 w-3" />
+                  {t("localModel.title")}
+                </span>
+              )}
+
+              {isComposite && (
+                <>
+                  <span className="inline-flex items-center gap-1 rounded-md bg-indigo-100 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">
+                    <Layers className="h-3 w-3" />
+                    {t("provider.composite.badge", {
+                      providers: compositeMembers.length,
+                      models: compositeModelCount,
+                    })}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setIsExpanded(!isExpanded);
+                    }}
+                    className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors text-gray-500 dark:text-gray-400"
+                    title={
+                      isExpanded
+                        ? t("usage.collapse", { defaultValue: "收起" })
+                        : t("usage.expand", { defaultValue: "展开" })
+                    }
+                  >
+                    {isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                  </button>
+                </>
+              )}
 
               {isOmo && (
                 <span className="inline-flex items-center rounded-md bg-violet-100 px-1.5 py-0.5 text-[10px] font-semibold text-violet-700 dark:bg-violet-900/40 dark:text-violet-300">
@@ -485,7 +578,7 @@ export function ProviderCard({
               )}
             </div>
 
-            {displayUrl && (
+            {displayUrl && !isComposite && (
               <button
                 type="button"
                 onClick={handleOpenWebsite}
@@ -501,13 +594,32 @@ export function ProviderCard({
                 <span className="min-w-0 truncate">{displayUrl}</span>
               </button>
             )}
+
+            {isComposite && isExpanded && compositeMembers.length > 0 && (
+              <div className="space-y-1 text-xs text-muted-foreground">
+                {compositeMembers.map((member) => (
+                  <div
+                    key={member.providerId}
+                    className="flex items-center gap-1.5"
+                  >
+                    <Layers className="h-3 w-3 flex-shrink-0" />
+                    <span className="truncate">
+                      {member.providerName} ·{" "}
+                      {t("provider.composite.modelsCount", {
+                        count: member.models?.length ?? 0,
+                      })}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
         <div className="flex items-center ml-auto min-w-0 gap-3">
           <div className="ml-auto">
             <div className="flex items-center gap-1">
-              {isCopilot ? (
+              {isComposite ? null : isCopilot ? (
                 <CopilotQuotaFooter
                   meta={provider.meta}
                   inline={true}
@@ -545,7 +657,7 @@ export function ProviderCard({
                     })}
                   </span>
                 </div>
-              ) : (
+              ) : !localUsageDisabled ? (
                 <UsageFooter
                   provider={provider}
                   providerId={provider.id}
@@ -555,7 +667,7 @@ export function ProviderCard({
                   isInConfig={isInConfig}
                   inline={true}
                 />
-              )}
+              ) : null}
               {hasMultiplePlans && (
                 <button
                   onClick={(e) => {
@@ -592,13 +704,20 @@ export function ProviderCard({
               onSwitch={() => onSwitch(provider)}
               onEdit={() => onEdit(provider)}
               onDuplicate={() => onDuplicate(provider)}
+              onCopyImportLink={
+                canCopyImportLink
+                  ? () => setIsCopyImportLinkConfirmOpen(true)
+                  : undefined
+              }
               onTest={
                 // 连通检测对第三方/自定义/Copilot/Codex-OAuth 供应商开放（这些正是旧的
                 // 真实请求探测会误报、而可达性探测能正确处理的对象）。官方供应商
                 // (category === "official") 一律隐藏：它们 base_url 故意留空、走客户端
                 // 默认/OAuth 端点，cc-switch 没有可靠的探测目标（尤其 Claude Desktop
                 // 官方是原生 1P 模式，根本不在请求路径上）。
-                onTest && provider.category !== "official"
+                onTest &&
+                provider.category !== "official" &&
+                !isComposite
                   ? () => onTest(provider)
                   : undefined
               }
@@ -606,7 +725,8 @@ export function ProviderCard({
                 (isOfficial && !supportsOfficialSubscription) ||
                 isCopilot ||
                 isCodexOauth ||
-                isXaiOauth
+                isXaiOauth ||
+                isComposite
                   ? undefined
                   : () => onConfigureUsage(provider)
               }
@@ -647,6 +767,16 @@ export function ProviderCard({
           />
         </div>
       )}
+
+      <ConfirmDialog
+        isOpen={isCopyImportLinkConfirmOpen}
+        title={t("provider.copyImportLinkConfirmTitle")}
+        message={t("provider.copyImportLinkConfirmMessage")}
+        confirmText={t("provider.copyImportLinkConfirm")}
+        variant="info"
+        onConfirm={() => void handleCopyImportLink()}
+        onCancel={() => setIsCopyImportLinkConfirmOpen(false)}
+      />
     </div>
   );
 }
