@@ -70,7 +70,74 @@ pub async fn get_status(State(state): State<ProxyState>) -> Result<Json<ProxySta
     Ok(Json(status))
 }
 
-/// GET /v1/models — Codex model list (reachability check)
+/// Claude Code 客户端探测：带 `anthropic-version` 头，或 UA 含 `claude-cli`。
+fn is_claude_code_client(headers: &axum::http::HeaderMap) -> bool {
+    if headers.contains_key("anthropic-version") {
+        return true;
+    }
+    headers
+        .get("user-agent")
+        .and_then(|value| value.to_str().ok())
+        .map(|ua| ua.contains("claude-cli"))
+        .unwrap_or(false)
+}
+
+/// Claude Code 客户端请求 `GET /v1/models` 时的响应。
+///
+/// 仅在当前供应商是复合供应商时返回成员聚合的 Anthropic 格式模型列表；
+/// 非复合场景维持原有行为（走 Codex 目录文件逻辑）。
+/// 复合供应商的 Anthropic 格式模型列表（对齐
+/// `claude_desktop_config::model_list_response` 的 shape）。
+fn claude_composite_model_list(composite: &crate::provider::Provider) -> Value {
+    let routes = super::model_routes::composite_routes(composite);
+    let data: Vec<Value> = routes
+        .iter()
+        .map(|route| {
+            json!({
+                "type": "model",
+                "id": route.route_id,
+                "display_name": route.display_name,
+                "created_at": "2024-01-01T00:00:00Z",
+            })
+        })
+        .collect();
+    let first_id = data
+        .first()
+        .and_then(|item| item.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let last_id = data
+        .last()
+        .and_then(|item| item.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    json!({
+        "data": data,
+        "has_more": false,
+        "first_id": first_id,
+        "last_id": last_id,
+    })
+}
+
+async fn handle_claude_composite_models(state: &ProxyState) -> Option<Json<Value>> {
+    let providers = state
+        .provider_router
+        .select_providers("claude")
+        .await
+        .map_err(|e| ProxyError::DatabaseError(e.to_string()))
+        .ok()?;
+    let provider = providers.first()?;
+
+    if !super::model_routes::is_composite(provider) {
+        return None;
+    }
+
+    Some(Json(claude_composite_model_list(provider)))
+}
+
+/// GET /v1/models — 按客户端类型区分：Claude Code + 复合供应商返回 Anthropic
+/// 格式的成员聚合模型列表；其余维持 Codex 目录行为（reachability check）。
 ///
 /// Codex CLI probes this endpoint at startup and deserializes the response as a
 /// catalog with a top-level `models` field.  Return the cc-switch–managed model
@@ -80,7 +147,16 @@ pub async fn get_status(State(state): State<ProxyState>) -> Result<Json<ProxySta
 /// Only serves the catalog when the live config.toml still references the
 /// cc-switch–owned `model_catalog_json`, using the same path ownership rules as
 /// Codex live-setting import.
-pub async fn handle_models() -> Result<Json<Value>, ProxyError> {
+pub async fn handle_models(
+    State(state): State<ProxyState>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<Value>, ProxyError> {
+    if is_claude_code_client(&headers) {
+        if let Some(response) = handle_claude_composite_models(&state).await {
+            return Ok(response);
+        }
+    }
+
     let config_dir = crate::codex_config::get_codex_config_dir();
     let active_catalog_path = match crate::codex_config::read_codex_config_text() {
         Ok(config_text) => {
@@ -2668,10 +2744,70 @@ async fn log_usage(
 mod tests {
     use super::{
         body_looks_like_sse, chat_sse_to_response_value, classify_body_for_diagnostics,
-        codex_proxy_error_json, responses_sse_to_response_value,
-        should_use_claude_transform_streaming, transform, upstream_body_parse_error,
+        claude_composite_model_list, codex_proxy_error_json, is_claude_code_client,
+        responses_sse_to_response_value, should_use_claude_transform_streaming, transform,
+        upstream_body_parse_error,
     };
     use crate::proxy::ProxyError;
+
+    fn composite_provider_fixture() -> crate::provider::Provider {
+        let mut composite = crate::provider::Provider::with_id(
+            "comp".to_string(),
+            "复合".to_string(),
+            serde_json::json!({
+                "composite": {"members": [
+                    {"providerId": "a", "providerName": "来源A", "models": [
+                        {"model": "claude-sonnet-4", "displayName": "Sonnet 4"}
+                    ]},
+                    {"providerId": "b", "providerName": "来源B", "models": [
+                        {"model": "gpt-5.6"}
+                    ]}
+                ]}
+            }),
+            None,
+        );
+        composite.meta = Some(crate::provider::ProviderMeta {
+            provider_type: Some("composite".to_string()),
+            ..Default::default()
+        });
+        composite
+    }
+
+    #[test]
+    fn claude_client_detection_matches_header_and_user_agent() {
+        let mut headers = axum::http::HeaderMap::new();
+        assert!(!is_claude_code_client(&headers));
+
+        headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
+        assert!(is_claude_code_client(&headers));
+
+        let mut ua_headers = axum::http::HeaderMap::new();
+        ua_headers.insert(
+            "user-agent",
+            "claude-cli/2.1.0 (external, cli)".parse().unwrap(),
+        );
+        assert!(is_claude_code_client(&ua_headers));
+
+        let mut other_headers = axum::http::HeaderMap::new();
+        other_headers.insert("user-agent", "codex_cli_rs/0.0.1".parse().unwrap());
+        assert!(!is_claude_code_client(&other_headers));
+    }
+
+    #[test]
+    fn claude_composite_model_list_uses_anthropic_shape_and_prefixed_ids() {
+        let response = claude_composite_model_list(&composite_provider_fixture());
+
+        let data = response["data"].as_array().expect("data array");
+        assert_eq!(data.len(), 2);
+        assert_eq!(data[0]["type"], "model");
+        assert_eq!(data[0]["id"], "ccs/a/claude-sonnet-4");
+        assert_eq!(data[0]["display_name"], "来源A · Sonnet 4");
+        assert_eq!(data[1]["id"], "ccs/b/gpt-5.6");
+        assert_eq!(response["has_more"], false);
+        assert_eq!(response["first_id"], "ccs/a/claude-sonnet-4");
+        assert_eq!(response["last_id"], "ccs/b/gpt-5.6");
+        assert!(data[0]["created_at"].as_str().is_some());
+    }
 
     #[test]
     fn body_looks_like_sse_detects_unlabeled_sse_prefixes() {

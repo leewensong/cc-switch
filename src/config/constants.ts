@@ -3,6 +3,7 @@ export const PROVIDER_TYPES = {
   GITHUB_COPILOT: "github_copilot",
   CODEX_OAUTH: "codex_oauth",
   XAI_OAUTH: "xai_oauth",
+  COMPOSITE: "composite",
 } as const;
 
 // 托管 OAuth 供应商类型：真实凭据由本地代理按请求注入，因此无论上游是否

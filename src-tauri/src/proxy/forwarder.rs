@@ -29,6 +29,7 @@ use crate::proxy::providers::xai_oauth_auth::XaiOAuthManager;
 use crate::{
     app_config::AppType,
     provider::{LocalProxyRequestOverrides, Provider},
+    proxy::model_routes::ModelRoute,
 };
 use bytes::Bytes;
 use futures::StreamExt;
@@ -146,6 +147,10 @@ pub struct RequestForwarder {
     /// `max_attempts = max_retries + 1`，所以 max_retries=0 表示仅尝试一家、
     /// max_retries=3（默认）表示最多 4 家。loop 同时受 providers.len() 自然限制。
     max_attempts: usize,
+    /// 请求级模型路由。显式路由不应改写应用级 current provider。
+    model_route: Option<ModelRoute>,
+    /// 是否为请求级路由请求（缓存，避免在成功路径上触发全局切换）。
+    routed_request: bool,
 }
 
 impl RequestForwarder {
@@ -213,6 +218,7 @@ impl RequestForwarder {
         optimizer_config: OptimizerConfig,
         copilot_optimizer_config: CopilotOptimizerConfig,
         max_retries: u32,
+        model_route: Option<ModelRoute>,
     ) -> Self {
         // max_retries 是「失败后重试次数」语义，attempt 上限 = retries + 1。
         // saturating_add 防止 u32::MAX + 1 溢出。
@@ -236,6 +242,8 @@ impl RequestForwarder {
                 streaming_first_byte_timeout,
             ),
             max_attempts,
+            routed_request: model_route.is_some(),
+            model_route,
         }
     }
 
@@ -394,6 +402,20 @@ impl RequestForwarder {
         extensions: Extensions,
         providers: Vec<Provider>,
     ) -> Result<ForwardResult, ForwardError> {
+        // The client-visible route id is only a catalog alias. Resolve it once
+        // before provider-specific mapping/format conversion so every adapter
+        // sees the actual upstream model. Keep request_model in RequestContext
+        // unchanged for usage attribution and diagnostics.
+        let body = if let Some(route) = &self.model_route {
+            let mut body = body;
+            if body.get("model").and_then(Value::as_str) == Some(route.route_id.as_str()) {
+                body["model"] = Value::String(route.upstream_model.clone());
+            }
+            body
+        } else {
+            body
+        };
+
         // 获取适配器
         let adapter = get_adapter(app_type).ok_or_else(|| ForwardError {
             error: ProxyError::ConfigError(format!(
@@ -416,7 +438,7 @@ impl RequestForwarder {
         let mut attempted_providers = 0usize;
 
         // 单 Provider 场景下跳过熔断器检查（故障转移关闭时）
-        let bypass_circuit_breaker = providers.len() == 1;
+        let bypass_circuit_breaker = providers.len() == 1 && !self.routed_request;
 
         // 依次尝试每个供应商
         for provider in providers.iter() {
@@ -503,7 +525,7 @@ impl RequestForwarder {
                         .await;
 
                     // 更新当前应用类型使用的 provider
-                    {
+                    if !self.routed_request {
                         let mut current_providers = self.current_providers.write().await;
                         current_providers.insert(
                             app_type_str.to_string(),
@@ -516,8 +538,8 @@ impl RequestForwarder {
                         let mut status = self.status.write().await;
                         status.success_requests += 1;
                         status.last_error = None;
-                        let should_switch =
-                            self.current_provider_id_at_start.as_str() != provider.id.as_str();
+                        let should_switch = !self.routed_request
+                            && self.current_provider_id_at_start.as_str() != provider.id.as_str();
                         if should_switch {
                             status.failover_count += 1;
 
@@ -606,7 +628,7 @@ impl RequestForwarder {
                                     )
                                     .await;
 
-                                    {
+                                    if !self.routed_request {
                                         let mut current_providers =
                                             self.current_providers.write().await;
                                         current_providers.insert(
@@ -619,8 +641,8 @@ impl RequestForwarder {
                                         let mut status = self.status.write().await;
                                         status.success_requests += 1;
                                         status.last_error = None;
-                                        let should_switch =
-                                            self.current_provider_id_at_start.as_str()
+                                        let should_switch = !self.routed_request
+                                            && self.current_provider_id_at_start.as_str()
                                                 != provider.id.as_str();
                                         if should_switch {
                                             status.failover_count += 1;
@@ -751,7 +773,7 @@ impl RequestForwarder {
                                         .await;
 
                                         // 更新当前应用类型使用的 provider
-                                        {
+                                        if !self.routed_request {
                                             let mut current_providers =
                                                 self.current_providers.write().await;
                                             current_providers.insert(
@@ -765,8 +787,8 @@ impl RequestForwarder {
                                             let mut status = self.status.write().await;
                                             status.success_requests += 1;
                                             status.last_error = None;
-                                            let should_switch =
-                                                self.current_provider_id_at_start.as_str()
+                                            let should_switch = !self.routed_request
+                                                && self.current_provider_id_at_start.as_str()
                                                     != provider.id.as_str();
                                             if should_switch {
                                                 status.failover_count += 1;
@@ -916,7 +938,7 @@ impl RequestForwarder {
                                     )
                                     .await;
 
-                                    {
+                                    if !self.routed_request {
                                         let mut current_providers =
                                             self.current_providers.write().await;
                                         current_providers.insert(
@@ -929,8 +951,8 @@ impl RequestForwarder {
                                         let mut status = self.status.write().await;
                                         status.success_requests += 1;
                                         status.last_error = None;
-                                        let should_switch =
-                                            self.current_provider_id_at_start.as_str()
+                                        let should_switch = !self.routed_request
+                                            && self.current_provider_id_at_start.as_str()
                                                 != provider.id.as_str();
                                         if should_switch {
                                             status.failover_count += 1;
@@ -3646,6 +3668,8 @@ mod tests {
             non_streaming_timeout,
             streaming_first_byte_timeout,
             max_attempts: 1,
+            model_route: None,
+            routed_request: false,
         }
     }
 

@@ -6,6 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   Plus,
+  Layers,
   Settings,
   ArrowLeft,
   Minus,
@@ -66,6 +67,7 @@ import { AppSwitcher } from "@/components/AppSwitcher";
 import { ProfileSwitcher } from "@/components/profiles/ProfileSwitcher";
 import { ProviderList } from "@/components/providers/ProviderList";
 import { AddProviderDialog } from "@/components/providers/AddProviderDialog";
+import { CompositeProviderDialog } from "@/components/providers/CompositeProviderDialog";
 import { EditProviderDialog } from "@/components/providers/EditProviderDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { SettingsPage } from "@/components/settings/SettingsPage";
@@ -107,6 +109,7 @@ import ToolsPanel from "@/components/openclaw/ToolsPanel";
 import AgentsDefaultsPanel from "@/components/openclaw/AgentsDefaultsPanel";
 import OpenClawHealthBanner from "@/components/openclaw/OpenClawHealthBanner";
 import HermesMemoryPanel from "@/components/hermes/HermesMemoryPanel";
+import { LocalModelPage } from "@/components/local/LocalModelPage";
 import {
   APP_IDS,
   DEFAULT_VISIBLE_APPS,
@@ -114,6 +117,7 @@ import {
 } from "@/config/appConfig";
 
 type View =
+  | "local"
   | "providers"
   | "settings"
   | "prompts"
@@ -149,6 +153,7 @@ const getInitialApp = (): AppId => {
 
 const VIEW_STORAGE_KEY = "cc-switch-last-view";
 const VALID_VIEWS: View[] = [
+  "local",
   "providers",
   "settings",
   "prompts",
@@ -185,6 +190,7 @@ function App() {
     useState<SkillsPageSource>("repos");
   const [settingsDefaultTab, setSettingsDefaultTab] = useState("general");
   const [isAddOpen, setIsAddOpen] = useState(false);
+  const [isCompositeAddOpen, setIsCompositeAddOpen] = useState(false);
   const [isWindowMaximized, setIsWindowMaximized] = useState(false);
   const [mcpManagementBusy, setMcpManagementBusy] = useState(false);
   const [skillsManagementBusy, setSkillsManagementBusy] = useState(false);
@@ -431,6 +437,17 @@ function App() {
 
   useTauriEvent("universal-provider-synced", async () => {
     await queryClient.invalidateQueries({ queryKey: ["providers"] });
+    try {
+      await providersApi.updateTrayMenu();
+    } catch (error) {
+      console.error("[App] Failed to update tray menu", error);
+    }
+  });
+
+  // Local LLM v4.0：服务就绪后自动切换完成 → 刷新供应商列表与当前供应商
+  useTauriEvent("local-model://auto-switched", async () => {
+    await queryClient.invalidateQueries({ queryKey: ["providers"] });
+    await queryClient.invalidateQueries({ queryKey: ["currentProvider"] });
     try {
       await providersApi.updateTrayMenu();
     } catch (error) {
@@ -1028,6 +1045,8 @@ function App() {
               onPrimaryActionChange={setPromptPrimaryAction}
             />
           );
+        case "local":
+          return <LocalModelPage />;
         case "hermesMemory":
           return <HermesMemoryPanel />;
         case "skills":
@@ -1298,6 +1317,7 @@ function App() {
                   <ArrowLeft className="w-4 h-4" />
                 </Button>
                 <h1 className="text-lg font-semibold">
+                  {currentView === "local" && t("localModel.title")}
                   {currentView === "settings" && t("settings.title")}
                   {currentView === "prompts" &&
                     t("prompts.title", {
@@ -1329,6 +1349,17 @@ function App() {
                     proxyStatus !== undefined && takeoverStatus !== undefined
                   }
                 />
+                {!isWindows() && !isLinux() && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => setCurrentView("local")}
+                    title={t("localModel.title")}
+                    className="hover:bg-black/5 dark:hover:bg-white/5"
+                  >
+                    <Cpu className="w-4 h-4" />
+                  </Button>
+                )}
                 <Button
                   variant="ghost"
                   size="icon"
@@ -1727,6 +1758,18 @@ function App() {
                       </AnimatePresence>
                     </div>
 
+                    {(activeApp === "claude" || activeApp === "codex") && (
+                      <Button
+                        onClick={() => setIsCompositeAddOpen(true)}
+                        size="icon"
+                        className={`ml-2 ${addActionButtonClass}`}
+                        aria-label={t("provider.composite.createTitle")}
+                        title={t("provider.composite.createTitle")}
+                      >
+                        <Layers className="w-5 h-5" />
+                      </Button>
+                    )}
+
                     <Button
                       onClick={() => setIsAddOpen(true)}
                       size="icon"
@@ -1757,6 +1800,16 @@ function App() {
         appId={activeApp}
         onSubmit={addProvider}
       />
+
+      {(activeApp === "claude" || activeApp === "codex") && (
+        <CompositeProviderDialog
+          open={isCompositeAddOpen}
+          onOpenChange={setIsCompositeAddOpen}
+          appId={activeApp}
+          providers={Object.values(providers)}
+          onSubmit={addProvider}
+        />
+      )}
 
       <EditProviderDialog
         open={Boolean(editingProvider)}

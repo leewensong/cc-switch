@@ -44,7 +44,7 @@ arboard = "3.6"
 flate2 = "1"
 brotli = "7"
 zstd = "0.13"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "process", "io-util"] }
 futures = "0.3"
 async-stream = "0.3"
 bytes = "1.5"
@@ -119,3 +119,8 @@ strip = "symbols"
 [dev-dependencies]
 serial_test = "3"
 tempfile = "3"
+# local_smoke 集成测试用（真实进程拉起）
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "process", "io-util"] }
+reqwest = { version = "0.12", features = ["rustls-tls", "json", "stream"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+dirs = "5.0"

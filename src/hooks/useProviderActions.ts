@@ -301,12 +301,17 @@ export function useProviderActions(
 
         // Show backfill warning if present
         if (result?.warnings?.length) {
+          const isLocalAutoSwitch = result.warnings.includes(
+            "local.starting_auto_switch",
+          );
           toast.warning(
-            t("notifications.backfillWarning", {
-              defaultValue:
-                "切换成功，但旧供应商配置回填失败，您手动修改的配置可能未保存",
-            }),
-            { duration: 5000 },
+            isLocalAutoSwitch
+              ? t("localModel.startingAutoSwitch")
+              : t("notifications.backfillWarning", {
+                  defaultValue:
+                    "切换成功，但旧供应商配置回填失败，您手动修改的配置可能未保存",
+                }),
+            { duration: isLocalAutoSwitch ? 8000 : 5000 },
           );
         }
 

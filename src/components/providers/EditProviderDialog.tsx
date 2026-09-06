@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Save } from "lucide-react";
+import { Layers, Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { FullScreenPanel } from "@/components/common/FullScreenPanel";
-import type { Provider } from "@/types";
+import type { CompositeConfig, Provider } from "@/types";
+import { PROVIDER_TYPES } from "@/config/constants";
 import {
   ProviderForm,
   type ProviderFormValues,
@@ -81,6 +83,15 @@ export function EditProviderDialog({
       // 代理接管模式：Live 配置已被代理改写，读取 live 会导致编辑界面展示代理地址/占位符等内容
       // 因此直接回退到 SSOT（数据库）配置，避免用户困惑与误保存
       if (isProxyTakeover) {
+        if (!cancelled) {
+          setLiveSettings(null);
+          setHasLoadedLive(true);
+        }
+        return;
+      }
+
+      // 复合供应商没有单一 live 配置可读（live 是接管后的代理占位配置），始终以 SSOT 为准
+      if (provider.meta?.providerType === PROVIDER_TYPES.COMPOSITE) {
         if (!cancelled) {
           setLiveSettings(null);
           setHasLoadedLive(true);
@@ -239,8 +250,97 @@ export function EditProviderDialog({
     [appId, onSubmit, onOpenChange, provider],
   );
 
+  const [compositeName, setCompositeName] = useState("");
+
+  useEffect(() => {
+    if (
+      open &&
+      provider &&
+      provider.meta?.providerType === PROVIDER_TYPES.COMPOSITE
+    ) {
+      setCompositeName(provider.name);
+    }
+  }, [open, provider?.id, provider?.name]);
+
+  const handleCompositeSubmit = useCallback(async () => {
+    if (!provider) return;
+    setIsFormSubmitting(true);
+    try {
+      await onSubmit({
+        provider: { ...provider, name: compositeName.trim() },
+        originalId: provider.id,
+      });
+      onOpenChange(false);
+    } finally {
+      setIsFormSubmitting(false);
+    }
+  }, [provider, compositeName, onSubmit, onOpenChange]);
+
   if (!provider || !initialData) {
     return null;
+  }
+
+  if (provider.meta?.providerType === PROVIDER_TYPES.COMPOSITE) {
+    const compositeConfig = (
+      provider.settingsConfig as Record<string, unknown>
+    )?.composite as CompositeConfig | undefined;
+    const members = compositeConfig?.members ?? [];
+    return (
+      <FullScreenPanel
+        isOpen={open}
+        title={t("provider.editProvider")}
+        onClose={() => onOpenChange(false)}
+        footer={
+          <Button
+            onClick={() => void handleCompositeSubmit()}
+            disabled={!compositeName.trim() || isFormSubmitting}
+            className="bg-primary text-primary-foreground hover:bg-primary/90"
+          >
+            <Save className="h-4 w-4 mr-2" />
+            {t("common.save")}
+          </Button>
+        }
+      >
+        <div className="space-y-2">
+          <label className="text-sm font-medium" htmlFor="composite-edit-name">
+            {t("provider.composite.nameLabel")}
+          </label>
+          <Input
+            id="composite-edit-name"
+            value={compositeName}
+            onChange={(event) => setCompositeName(event.target.value)}
+            placeholder={t("provider.composite.namePlaceholder")}
+          />
+        </div>
+
+        <div className="space-y-2">
+          <div className="text-sm font-medium">
+            {t("provider.composite.membersSection")}
+          </div>
+          <div className="rounded-lg border divide-y">
+            {members.map((member) => (
+              <div
+                key={member.providerId}
+                className="flex items-center gap-2 px-3 py-2.5"
+              >
+                <Layers className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
+                <div className="flex-1 min-w-0 text-sm truncate">
+                  {member.providerName}
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  {t("provider.composite.modelsCount", {
+                    count: member.models?.length ?? 0,
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {t("provider.composite.editMembersHint")}
+          </p>
+        </div>
+      </FullScreenPanel>
+    );
   }
 
   return (

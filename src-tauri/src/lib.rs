@@ -20,6 +20,7 @@ mod init_status;
 mod lightweight;
 #[cfg(target_os = "linux")]
 mod linux_fix;
+pub mod local;
 mod mcp;
 mod model_capabilities;
 mod openclaw_config;
@@ -1113,6 +1114,56 @@ pub fn run() {
             // 将同一个实例注入到全局状态，避免重复创建导致的不一致
             app.manage(app_state);
 
+            // 初始化本地 MLX 服务管理器（Local LLM v4.0）
+            {
+                let state = app.state::<AppState>();
+                state.local.attach(app.handle().clone());
+                let settings = crate::local::settings::load_local_settings();
+                state.local.refresh_status_shape(&settings);
+                let db = state.db.clone();
+                let settings_for_rows = settings.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    if let Err(e) = crate::local::providers::refresh_local_provider_rows(
+                        &db,
+                        &settings_for_rows,
+                    ) {
+                        log::warn!("✗ Failed to seed Local MLX provider rows: {e}");
+                    } else {
+                        log::info!("✓ Local MLX provider rows ready");
+                    }
+                });
+
+                // 开机自动启动上次模型（LocalSettings.auto_start_with_app）
+                if settings.auto_start_with_app {
+                    if let Some(model_path) = settings.selected_model_path.clone() {
+                        let local_manager = state.local.clone();
+                        let db_for_start = state.db.clone();
+                        let settings_for_start = settings.clone();
+                        log::info!(
+                            "auto_start_with_app: 自动启动本地模型 {}",
+                            model_path
+                        );
+                        tauri::async_runtime::spawn(async move {
+                            match crate::commands::resolve_model(
+                                &db_for_start,
+                                &model_path,
+                            ) {
+                                Ok(model) => {
+                                    if let Err(e) =
+                                        local_manager.start(model, settings_for_start).await
+                                    {
+                                        log::error!("auto_start_with_app 启动失败: {e}");
+                                    }
+                                }
+                                Err(e) => {
+                                    log::warn!("auto_start_with_app 模型解析失败: {e}");
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+
             // 初始化 SkillService
             let skill_service = SkillService::new();
             app.manage(commands::skill::SkillServiceState(Arc::new(skill_service)));
@@ -1347,6 +1398,22 @@ pub fn run() {
             commands::delete_provider,
             commands::remove_provider_from_live_config,
             commands::switch_provider,
+            // Local LLM (v4.0)
+            commands::local_models_list,
+            commands::local_models_rescan,
+            commands::local_models_add_root,
+            commands::local_models_remove_root,
+            commands::local_models_remove_ref,
+            commands::local_service_start,
+            commands::local_service_stop,
+            commands::local_service_status,
+            commands::local_service_logs,
+            commands::local_service_clear_logs,
+            commands::local_service_test,
+            commands::local_service_diagnostics,
+            commands::local_settings_get,
+            commands::local_settings_set,
+            commands::get_local_settings_path,
             commands::import_default_config,
             commands::get_claude_desktop_status,
             commands::get_claude_desktop_default_routes,
@@ -1882,6 +1949,20 @@ pub async fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
                 log::error!("退出时停止代理失败: {e}");
             }
             log::info!("代理服务器清理完成");
+        }
+
+        // Local LLM v4.0：退出时停止本地服务（MLX + 网关双进程），
+        // 避免孤儿进程继续占用 8090/8091 导致下次启动端口冲突。
+        {
+            let status = state.local.status().await;
+            if status.state.is_running() {
+                log::info!(
+                    "检测到本地 MLX 服务正在运行（{}），开始停止...",
+                    status.state
+                );
+                state.local.stop().await;
+                log::info!("本地 MLX 服务清理完成");
+            }
         }
     }
 }

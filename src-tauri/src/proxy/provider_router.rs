@@ -7,6 +7,7 @@ use crate::database::Database;
 use crate::error::AppError;
 use crate::provider::Provider;
 use crate::proxy::circuit_breaker::{AllowResult, CircuitBreaker, CircuitBreakerConfig};
+use crate::proxy::model_routes::{self, ModelRoute};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -106,6 +107,118 @@ impl ProviderRouter {
         }
 
         Ok(result)
+    }
+
+    /// 按请求中的模型别名选择供应商。
+    ///
+    /// 普通模型保持既有的“当前供应商 / 故障转移队列”语义。Codex 聚合
+    /// catalog 产生的 `ccs/...` 模型则绕过全局 current provider，直接绑定
+    /// 到别名所属的供应商；路由请求只返回这一家，避免一次失败无提示地消耗
+    /// 另一套餐额度。熔断器放行仍由 forwarder 在真正发请求前统一处理。
+    ///
+    /// 当前供应商是复合供应商时：
+    /// - `ccs/...` 模型按成员 ID 从 DB 实时解析成员供应商（URL/密钥取最新）；
+    /// - 无前缀普通模型路由到第一个成员，并合成 `route_id == upstream_model`
+    ///   的兜底路由（forwarder 改写为 no-op，且不触发全局切换）。
+    pub async fn select_providers_for_model(
+        &self,
+        app_type: &str,
+        request_model: &str,
+    ) -> Result<(Vec<Provider>, Option<ModelRoute>), AppError> {
+        let providers = match self.select_providers(app_type).await {
+            Ok(providers) => {
+                if providers.first().map(model_routes::is_composite) == Some(true) {
+                    return self.select_for_composite(app_type, &providers, request_model);
+                }
+                providers
+            }
+            Err(err) => {
+                // Codex 的聚合 `ccs/` 解析不依赖 current provider（目录覆盖
+                // 所有供应商），没有 current 时也必须能按别名路由。
+                if app_type != "codex" || !model_routes::is_route_model(request_model) {
+                    return Err(err);
+                }
+                Vec::new()
+            }
+        };
+
+        if app_type != "codex" || !model_routes::is_route_model(request_model) {
+            return Ok((providers, None));
+        }
+
+        let all_providers = self.db.get_all_providers(app_type)?;
+        let route = model_routes::resolve_route(all_providers.values(), request_model).ok_or_else(
+            || {
+                AppError::InvalidInput(format!(
+                    "未知的模型路由: {request_model}。请刷新 Codex 模型目录后重试"
+                ))
+            },
+        )?;
+        let provider = all_providers.get(&route.provider_id).cloned().ok_or_else(|| {
+            AppError::InvalidInput(format!(
+                "模型路由 {} 指向的供应商不存在: {}",
+                route.route_id, route.provider_id
+            ))
+        })?;
+        Ok((vec![provider], Some(route)))
+    }
+
+    /// 复合供应商的路由选择。
+    ///
+    /// 成员快照只决定目录展示；这里按 `providerId` 从 DB 重新加载成员，
+    /// 保证转发永远使用成员的最新 URL / 密钥。快照中已不存在的成员被跳过。
+    fn select_for_composite(
+        &self,
+        app_type: &str,
+        selected: &[Provider],
+        request_model: &str,
+    ) -> Result<(Vec<Provider>, Option<ModelRoute>), AppError> {
+        let composite = selected
+            .iter()
+            .find(|provider| model_routes::is_composite(provider))
+            .ok_or_else(|| AppError::NoProvidersConfigured)?;
+        let member_ids = model_routes::composite_member_ids(composite);
+
+        let all_providers = self.db.get_all_providers(app_type)?;
+        let members: Vec<Provider> = member_ids
+            .iter()
+            .filter_map(|id| all_providers.get(id).cloned())
+            .collect();
+
+        if members.is_empty() {
+            return Err(AppError::InvalidInput(format!(
+                "复合供应商 {} 的成员均不存在，请重新创建复合供应商",
+                composite.name
+            )));
+        }
+
+        if model_routes::is_route_model(request_model) {
+            // 路由 id 来自复合快照（成员自身的 modelCatalog 不一定存在，
+            // Claude 成员尤其如此），成员 provider 只负责提供 URL / 密钥。
+            let route = model_routes::composite_routes(composite)
+                .into_iter()
+                .find(|route| route.route_id == request_model)
+                .ok_or_else(|| {
+                    AppError::InvalidInput(format!(
+                        "未知的模型路由: {request_model}。请刷新模型目录后重试"
+                    ))
+                })?;
+            let member = members
+                .iter()
+                .find(|provider| provider.id == route.provider_id)
+                .ok_or_else(|| {
+                    AppError::InvalidInput(format!(
+                        "模型路由 {} 指向的供应商不存在: {}",
+                        route.route_id, route.provider_id
+                    ))
+                })?;
+            return Ok((vec![member.clone()], Some(route)));
+        }
+
+        // 无前缀普通模型：兜底路由到第一个成员，按原名转发。
+        let first = members.first().expect("checked non-empty above");
+        let route = model_routes::composite_fallback_route(first, request_model);
+        Ok((vec![first.clone()], Some(route)))
     }
 
     /// 请求执行前获取熔断器“放行许可”
@@ -358,6 +471,158 @@ mod tests {
 
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].id, "a");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_composite_route_resolves_member_from_snapshot() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+
+        let member_a =
+            Provider::with_id("a".to_string(), "来源A".to_string(), json!({}), None);
+        let member_b =
+            Provider::with_id("b".to_string(), "来源B".to_string(), json!({}), None);
+        let mut composite = Provider::with_id(
+            "comp".to_string(),
+            "复合".to_string(),
+            json!({"composite": {"members": [
+                {"providerId": "a", "providerName": "来源A", "models": [
+                    {"model": "claude-sonnet-4", "displayName": "Sonnet 4"}]},
+                {"providerId": "b", "providerName": "来源B", "models": [
+                    {"model": "claude-opus-4"}]}
+            ]}}),
+            None,
+        );
+        composite.meta = Some(crate::provider::ProviderMeta {
+            provider_type: Some("composite".to_string()),
+            ..Default::default()
+        });
+
+        db.save_provider("claude", &member_a).unwrap();
+        db.save_provider("claude", &member_b).unwrap();
+        db.save_provider("claude", &composite).unwrap();
+        db.set_current_provider("claude", "comp").unwrap();
+
+        let router = ProviderRouter::new(db);
+        let (providers, route) = router
+            .select_providers_for_model("claude", "ccs/b/claude-opus-4")
+            .await
+            .unwrap();
+        let route = route.expect("composite route");
+
+        assert_eq!(route.upstream_model, "claude-opus-4");
+        assert_eq!(route.provider_id, "b");
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, "b");
+        assert_eq!(providers[0].name, "来源B");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_composite_plain_model_falls_back_to_first_member() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+
+        let member_a =
+            Provider::with_id("a".to_string(), "来源A".to_string(), json!({}), None);
+        let member_b =
+            Provider::with_id("b".to_string(), "来源B".to_string(), json!({}), None);
+        let mut composite = Provider::with_id(
+            "comp".to_string(),
+            "复合".to_string(),
+            json!({"composite": {"members": [
+                {"providerId": "a", "providerName": "来源A", "models": [
+                    {"model": "claude-sonnet-4"}]},
+                {"providerId": "b", "providerName": "来源B", "models": [
+                    {"model": "claude-opus-4"}]}
+            ]}}),
+            None,
+        );
+        composite.meta = Some(crate::provider::ProviderMeta {
+            provider_type: Some("composite".to_string()),
+            ..Default::default()
+        });
+
+        db.save_provider("claude", &member_a).unwrap();
+        db.save_provider("claude", &member_b).unwrap();
+        db.save_provider("claude", &composite).unwrap();
+        db.set_current_provider("claude", "comp").unwrap();
+
+        let router = ProviderRouter::new(db);
+        let (providers, route) = router
+            .select_providers_for_model("claude", "claude-sonnet-4")
+            .await
+            .unwrap();
+        let route = route.expect("composite fallback route");
+
+        assert_eq!(route.route_id, "claude-sonnet-4");
+        assert_eq!(route.upstream_model, "claude-sonnet-4");
+        assert_eq!(route.provider_id, "a");
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, "a");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_model_route_selects_provider_without_using_current_or_failover_queue() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+
+        let provider_a = Provider::with_id(
+            "a".to_string(),
+            "Provider A".to_string(),
+            json!({
+                "modelCatalog": {"models": [{"model": "gpt-5.6"}]}
+            }),
+            None,
+        );
+        let provider_b = Provider::with_id(
+            "b".to_string(),
+            "Provider B".to_string(),
+            json!({
+                "modelCatalog": {"models": [{"model": "gpt-5.6"}]}
+            }),
+            None,
+        );
+
+        db.save_provider("codex", &provider_a).unwrap();
+        db.save_provider("codex", &provider_b).unwrap();
+        db.set_current_provider("codex", "a").unwrap();
+
+        // b is deliberately not in the failover queue. An explicit route still
+        // selects it, because model routing is independent from global failover.
+        let router = ProviderRouter::new(db);
+        let (providers, route) = router
+            .select_providers_for_model("codex", "ccs/b/gpt-5.6")
+            .await
+            .unwrap();
+
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, "b");
+        let route = route.expect("model route");
+        assert_eq!(route.upstream_model, "gpt-5.6");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_unknown_model_route_is_a_client_input_error() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        let provider = Provider::with_id(
+            "a".to_string(),
+            "Provider A".to_string(),
+            json!({"modelCatalog": {"models": [{"model": "gpt-5.6"}]}}),
+            None,
+        );
+        db.save_provider("codex", &provider).unwrap();
+
+        let router = ProviderRouter::new(db);
+        let error = router
+            .select_providers_for_model("codex", "ccs/a/missing")
+            .await
+            .expect_err("unknown route must fail");
+        assert!(matches!(error, AppError::InvalidInput(_)));
     }
 
     #[tokio::test]

@@ -316,6 +316,122 @@ mod tests {
         provider
     }
 
+    fn composite_codex_provider(id: &str, member_ids: &[&str]) -> Provider {
+        let members: Vec<Value> = member_ids
+            .iter()
+            .map(|member_id| {
+                json!({
+                    "providerId": member_id,
+                    "providerName": format!("来源 {member_id}"),
+                    "models": [{"model": format!("model-{member_id}")}]
+                })
+            })
+            .collect();
+
+        let mut provider = Provider::with_id(
+            id.to_string(),
+            format!("Composite {id}"),
+            json!({"composite": {"members": members}}),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("composite".to_string()),
+            ..Default::default()
+        });
+        provider
+    }
+
+    #[test]
+    #[serial]
+    fn deleting_a_member_prunes_it_from_composite_snapshots() {
+        with_test_home(|state, _home| {
+            for member_id in ["member-a", "member-b", "member-c"] {
+                ProviderService::add(
+                    state,
+                    AppType::Codex,
+                    Provider::with_id(
+                        member_id.to_string(),
+                        format!("Provider {member_id}"),
+                        codex_settings("https://api.example.com/v1", "test-key"),
+                        None,
+                    ),
+                    false,
+                )
+                .expect("save member provider");
+            }
+
+            // 复合供应商没有单一 auth/config，绕过 add 的校验直接落库
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &composite_codex_provider("comp-two", &["member-a", "member-b"]))
+                .expect("save composite with two members");
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &composite_codex_provider("comp-last", &["member-c"]))
+                .expect("save composite with one member");
+
+            ProviderService::delete(state, AppType::Codex, "member-b")
+                .expect("delete member-b");
+
+            let comp_two = state
+                .db
+                .get_provider_by_id("comp-two", AppType::Codex.as_str())
+                .expect("query comp-two")
+                .expect("comp-two should survive");
+            let members = comp_two.settings_config["composite"]["members"]
+                .as_array()
+                .expect("members array");
+            assert_eq!(members.len(), 1);
+            assert_eq!(members[0]["providerId"], "member-a");
+
+            ProviderService::delete(state, AppType::Codex, "member-c")
+                .expect("delete member-c");
+
+            let comp_last = state
+                .db
+                .get_provider_by_id("comp-last", AppType::Codex.as_str())
+                .expect("query comp-last");
+            assert!(comp_last.is_none(), "empty composite should be deleted");
+
+            // 删除复合本身不应触发再次清理或报错
+            ProviderService::delete(state, AppType::Codex, "comp-two")
+                .expect("delete composite itself");
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn db_only_non_additive_add_does_not_select_or_sync_the_provider() {
+        with_test_home(|state, home| {
+            let provider = Provider::with_id(
+                "db-only-codex".to_string(),
+                "DB only Codex".to_string(),
+                codex_settings("https://api.example.com/v1", "test-key"),
+                None,
+            );
+
+            ProviderService::add(state, AppType::Codex, provider, false)
+                .expect("save provider without syncing it");
+
+            assert_eq!(
+                ProviderService::current(state, AppType::Codex).expect("read current provider"),
+                ""
+            );
+            assert!(
+                state
+                    .db
+                    .get_provider_by_id("db-only-codex", AppType::Codex.as_str())
+                    .expect("query provider")
+                    .is_some(),
+                "the database-only provider should still be saved"
+            );
+            assert!(
+                !home.join(".codex").join("config.toml").exists(),
+                "a database-only add must not create Codex's live config"
+            );
+        });
+    }
+
     fn openclaw_provider(id: &str) -> Provider {
         Provider {
             id: id.to_string(),
@@ -2536,6 +2652,14 @@ impl ProviderService {
         if app_type == AppType::Pi {
             return pi::list(state);
         }
+        // Local LLM v4.0：确保 Local 卡片种子行存在（仅 macOS / 已支持 app）
+        if let Err(e) = crate::local::providers::ensure_local_provider_row(
+            &state.db,
+            &app_type,
+            &crate::local::settings::load_local_settings(),
+        ) {
+            log::debug!("Local provider seed skipped for {:?}: {e}", app_type);
+        }
         state.db.get_all_providers(app_type.as_str())
     }
 
@@ -2579,6 +2703,13 @@ impl ProviderService {
         // Save to database
         state.db.save_provider(app_type.as_str(), &provider)?;
 
+        // `add_to_live=false` is a strict database-only save. Besides avoiding
+        // a live-config write, it must not select the new provider merely
+        // because the target app has no current provider yet.
+        if !add_to_live {
+            return Ok(true);
+        }
+
         // Additive mode apps (OpenCode, OpenClaw): optionally write to live config.
         if app_type.is_additive_mode() {
             // OMO / OMO Slim providers use exclusive mode and write to dedicated config file.
@@ -2587,9 +2718,6 @@ impl ProviderService {
             {
                 // Do not auto-enable newly added OMO / OMO Slim providers.
                 // Users must explicitly switch/apply an OMO provider to activate it.
-                return Ok(true);
-            }
-            if !add_to_live {
                 return Ok(true);
             }
             write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
@@ -2857,6 +2985,17 @@ impl ProviderService {
             return pi::delete(state, id);
         }
 
+        // Local 卡片不可删除（ADR-001：缺省卡片，删除则由下次 list 重新种子）
+        if id == crate::local::LOCAL_PROVIDER_ID {
+            if let Ok(Some(p)) = state.db.get_provider_by_id(id, app_type.as_str()) {
+                if crate::local::providers::is_local_provider(&p) {
+                    return Err(AppError::Message(
+                        "本地模型卡片不可删除".to_string(),
+                    ));
+                }
+            }
+        }
+
         // Additive mode apps - no current provider concept
         if app_type.is_additive_mode() {
             // Single DB read shared across all additive-mode sub-paths below.
@@ -2915,7 +3054,49 @@ impl ProviderService {
             ));
         }
 
-        state.db.delete_provider(app_type.as_str(), id)
+        state.db.delete_provider(app_type.as_str(), id)?;
+        Self::prune_composite_members(state, app_type, id)
+    }
+
+    /// 删除供应商后，把同 app 复合供应商快照中的该成员移除。
+    /// 成员清空的复合供应商一并删除，避免留下无法路由的空壳。
+    fn prune_composite_members(
+        state: &AppState,
+        app_type: AppType,
+        deleted_id: &str,
+    ) -> Result<(), AppError> {
+        let composites: Vec<Provider> = state
+            .db
+            .get_all_providers(app_type.as_str())?
+            .into_iter()
+            .map(|(_, provider)| provider)
+            .filter(|provider| crate::proxy::model_routes::is_composite(provider))
+            .collect();
+
+        for composite in composites {
+            let Some(updated) =
+                crate::proxy::model_routes::composite_without_member(&composite, deleted_id)
+            else {
+                continue;
+            };
+
+            let has_members = updated
+                .get("composite")
+                .and_then(|composite| composite.get("members"))
+                .and_then(Value::as_array)
+                .is_some_and(|members| !members.is_empty());
+
+            if has_members {
+                state.db.update_provider_settings_config(
+                    app_type.as_str(),
+                    &composite.id,
+                    &updated,
+                )?;
+            } else {
+                state.db.delete_provider(app_type.as_str(), &composite.id)?;
+            }
+        }
+        Ok(())
     }
 
     /// Remove provider from live config only (for additive mode apps like OpenCode, OpenClaw)
@@ -3085,6 +3266,24 @@ impl ProviderService {
 
         // Normal mode: full switch with Live config write
         Self::switch_normal(state, app_type, id, &providers)
+    }
+
+    /// 切换到 Local MLX 卡片（Local LLM v4.0）。
+    ///
+    /// 用当前运行时设置（端口/别名）重建 Local 供应商的 settings_config，
+    /// 确保种子行与切换内容一致，然后走标准 `switch_normal` 流程
+    /// （backfill → current 设置 → write_live_with_common_config）。
+    pub fn switch_local(
+        state: &AppState,
+        app_type: AppType,
+    ) -> Result<SwitchResult, AppError> {
+        let settings = crate::local::settings::load_local_settings();
+        let fresh = crate::local::providers::build_local_provider(&app_type, &settings)?;
+        state.db.save_provider(app_type.as_str(), &fresh)?;
+
+        let mut providers = Self::list(state, app_type.clone())?;
+        providers.insert(crate::local::LOCAL_PROVIDER_ID.to_string(), fresh);
+        Self::switch_normal(state, app_type, crate::local::LOCAL_PROVIDER_ID, &providers)
     }
 
     /// Normal switch flow (non-proxy mode)
@@ -4213,22 +4412,25 @@ impl ProviderService {
                     )
                 })?;
 
-                let auth = settings.get("auth").ok_or_else(|| {
-                    AppError::localized(
-                        "provider.codex.auth.missing",
-                        format!("供应商 {} 缺少 auth 配置", provider.id),
-                        format!("Provider {} is missing auth configuration", provider.id),
-                    )
-                })?;
-                if !auth.is_object() {
-                    return Err(AppError::localized(
-                        "provider.codex.auth.not_object",
-                        format!("供应商 {} 的 auth 配置必须是 JSON 对象", provider.id),
-                        format!(
-                            "Provider {} auth configuration must be a JSON object",
-                            provider.id
-                        ),
-                    ));
+                // 复合供应商没有自己的 auth：凭据在路由时按成员实时从 DB 解析。
+                if !crate::proxy::model_routes::is_composite(provider) {
+                    let auth = settings.get("auth").ok_or_else(|| {
+                        AppError::localized(
+                            "provider.codex.auth.missing",
+                            format!("供应商 {} 缺少 auth 配置", provider.id),
+                            format!("Provider {} is missing auth configuration", provider.id),
+                        )
+                    })?;
+                    if !auth.is_object() {
+                        return Err(AppError::localized(
+                            "provider.codex.auth.not_object",
+                            format!("供应商 {} 的 auth 配置必须是 JSON 对象", provider.id),
+                            format!(
+                                "Provider {} auth configuration must be a JSON object",
+                                provider.id
+                            ),
+                        ));
+                    }
                 }
 
                 if let Some(config_value) = settings.get("config") {

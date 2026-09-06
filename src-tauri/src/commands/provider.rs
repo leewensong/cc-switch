@@ -107,6 +107,14 @@ pub async fn switch_provider(
     id: String,
 ) -> Result<SwitchResult, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+
+    // Local LLM v4.0：Local 卡片切换走本地服务编排（必要时先启动服务）
+    if id == crate::local::LOCAL_PROVIDER_ID {
+        return crate::commands::local::switch_to_local_provider(app_handle, app_type)
+            .await
+            .map_err(|e| e.to_string());
+    }
+
     tauri::async_runtime::spawn_blocking(move || {
         let state = app_handle
             .try_state::<AppState>()

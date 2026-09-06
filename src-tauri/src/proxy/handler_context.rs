@@ -7,6 +7,7 @@ use crate::provider::Provider;
 use crate::proxy::{
     extract_session_id,
     forwarder::RequestForwarder,
+    model_routes::ModelRoute,
     server::ProxyState,
     types::{AppProxyConfig, CopilotOptimizerConfig, OptimizerConfig, RectifierConfig},
     ProxyError,
@@ -48,6 +49,8 @@ pub struct RequestContext {
     pub current_provider_id: String,
     /// 请求中的模型名称
     pub request_model: String,
+    /// 请求级模型路由。存在时，该请求不会改变应用级 current provider。
+    pub model_route: Option<ModelRoute>,
     /// 实际发往上游的模型名（路由接管/模型映射后的真值，forward 成功后回填）。
     ///
     /// usage 归因的兜底顺序：上游响应回显 → outbound_model → request_model。
@@ -131,11 +134,14 @@ impl RequestContext {
 
         // 使用共享的 ProviderRouter 选择 Provider（熔断器状态跨请求保持）
         // 注意：只在这里调用一次，结果传递给 forwarder，避免重复消耗 HalfOpen 名额
-        let providers = state
+        let (providers, model_route) = state
             .provider_router
-            .select_providers(app_type_str)
+            .select_providers_for_model(app_type_str, &request_model)
             .await
             .map_err(|e| match e {
+                crate::error::AppError::InvalidInput(message) => {
+                    ProxyError::InvalidRequest(message)
+                }
                 crate::error::AppError::AllProvidersCircuitOpen => {
                     ProxyError::AllProvidersCircuitOpen
                 }
@@ -149,10 +155,14 @@ impl RequestContext {
             .ok_or(ProxyError::NoAvailableProvider)?;
 
         log::debug!(
-            "[{}] Provider: {}, model: {}, failover chain: {} providers, session: {}",
+            "[{}] Provider: {}, model: {}, route: {}, failover chain: {} providers, session: {}",
             tag,
             provider.name,
             request_model,
+            model_route
+                .as_ref()
+                .map(|route| route.route_id.as_str())
+                .unwrap_or("none"),
             providers.len(),
             session_id
         );
@@ -164,6 +174,7 @@ impl RequestContext {
             providers,
             current_provider_id,
             request_model,
+            model_route,
             outbound_model: None,
             tag,
             app_type_str,
@@ -241,6 +252,7 @@ impl RequestContext {
             self.optimizer_config.clone(),
             self.copilot_optimizer_config.clone(),
             max_retries,
+            self.model_route.clone(),
         )
     }
 

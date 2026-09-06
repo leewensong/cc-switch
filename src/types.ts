@@ -168,6 +168,23 @@ export interface LocalProxyRequestOverrides {
   body?: Record<string, unknown>;
 }
 
+// 复合供应商：把多个普通供应商的模型合并成一个目录。
+// 快照只驱动目录展示；路由时按 providerId 从 DB 实时解析成员（URL/密钥）。
+export interface CompositeMemberModel {
+  model: string;
+  displayName?: string;
+}
+
+export interface CompositeMember {
+  providerId: string;
+  providerName: string;
+  models: CompositeMemberModel[];
+}
+
+export interface CompositeConfig {
+  members: CompositeMember[];
+}
+
 // 供应商元数据（字段名与后端一致，保持 snake_case）
 export interface ProviderMeta {
   // 自定义端点：以 URL 为键，值为端点信息

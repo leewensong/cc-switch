@@ -109,6 +109,25 @@ impl ProxyService {
         } else {
             ClaudeTakeoverAuthPolicy::PreserveExistingOrAuthToken
         };
+        // 复合供应商没有单一上游模型：模型字段取第一个成员快照中的默认模型
+        // （普通名，无 ccs/ 前缀）。代理按"无前缀模型 → 第一个成员"的兜底
+        // 路由转发，且 routed_request 语义不会触发全局 current provider 切换。
+        // 先清掉 live 配置里的旧角色字段，避免它们抢占派生优先级。
+        if crate::proxy::model_routes::is_composite(provider) {
+            if let Some(env) = config.get_mut("env").and_then(|v| v.as_object_mut()) {
+                for key in CLAUDE_MODEL_OVERRIDE_ENV_KEYS {
+                    env.remove(key);
+                }
+            }
+            if let Some(default_model) = crate::proxy::model_routes::composite_routes(provider)
+                .first()
+                .map(|route| route.upstream_model.clone())
+            {
+                if let Some(env) = config.get_mut("env").and_then(|v| v.as_object_mut()) {
+                    env.insert("ANTHROPIC_MODEL".to_string(), json!(default_model));
+                }
+            }
+        }
         // Copilot/Codex 接管时 live config 可能还是旧供应商；显示模型必须跟随目标 provider。
         let takeover_model_fields = if provider.uses_managed_account_auth() {
             Self::build_claude_takeover_model_fields(&provider.settings_config)
@@ -2829,6 +2848,22 @@ impl ProxyService {
             updated =
                 crate::codex_config::update_codex_toml_field(&updated, "model", &upstream_model)
                     .map_err(|e| format!("更新 Codex 上游模型失败: {e}"))?;
+        } else if let Some(default_route) = provider
+            .filter(|provider| crate::proxy::model_routes::is_composite(provider))
+            .and_then(|composite| {
+                crate::proxy::model_routes::composite_routes(composite)
+                    .first()
+                    .cloned()
+            })
+        {
+            // 复合供应商没有单一上游模型：让 Codex 默认落在成员快照的第一个
+            // 路由上（ccs/ 前缀模型名由代理解析到对应成员）。
+            updated = crate::codex_config::update_codex_toml_field(
+                &updated,
+                "model",
+                &default_route.route_id,
+            )
+            .map_err(|e| format!("更新 Codex 上游模型失败: {e}"))?;
         }
 
         Ok(updated)
@@ -2983,6 +3018,46 @@ impl ProxyService {
         auth.get("OPENAI_API_KEY").and_then(|v| v.as_str()) == Some(PROXY_TOKEN_PLACEHOLDER)
     }
 
+    /// 复合供应商的聚合目录成员：按快照顺序取成员供应商，并把每个成员的
+    /// `modelCatalog.models` 覆盖为快照模型，保证聚合目录的 route id 与
+    /// 路由器的 `composite_routes` 解析完全一致。快照中已不存在的成员跳过。
+    fn composite_catalog_members(composite: &Provider, providers: &[Provider]) -> Vec<Provider> {
+        let Some(members) = composite
+            .settings_config
+            .get("composite")
+            .and_then(|composite| composite.get("members"))
+            .and_then(Value::as_array)
+        else {
+            return Vec::new();
+        };
+
+        let mut result = Vec::new();
+        for member in members {
+            let Some(provider_id) = member
+                .get("providerId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            else {
+                continue;
+            };
+            let Some(mut provider) = providers.iter().find(|p| p.id == provider_id).cloned()
+            else {
+                continue;
+            };
+            if let Some(models) = member.get("models") {
+                if let Some(settings) = provider.settings_config.as_object_mut() {
+                    settings.insert(
+                        "modelCatalog".to_string(),
+                        json!({ "models": models.clone() }),
+                    );
+                }
+            }
+            result.push(provider);
+        }
+        result
+    }
+
     fn write_codex_takeover_live_for_provider(
         &self,
         config: &Value,
@@ -3008,6 +3083,31 @@ impl ProxyService {
                     config, config_str, profile,
                 )
                 .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
+            // During proxy takeover Codex stays connected to one stable local
+            // endpoint. If multiple providers expose models, replace the
+            // provider-only catalog with a route catalog so the running proxy
+            // can select the upstream from each request's model slug.
+            let prepared_config = {
+                let providers = self
+                    .db
+                    .get_all_providers(AppType::Codex.as_str())
+                    .map_err(|e| format!("读取 Codex 供应商目录失败: {e}"))?;
+                let mut providers: Vec<Provider> = providers.into_values().collect();
+                if let Some(composite) =
+                    provider.filter(|provider| crate::proxy::model_routes::is_composite(provider))
+                {
+                    // 复合供应商：目录成员与模型必须来自快照（与路由器的
+                    // composite_routes 解析完全一致），而不是成员各自的
+                    // modelCatalog，否则 route id 会与路由器脱节。
+                    providers = Self::composite_catalog_members(composite, &providers);
+                }
+                crate::codex_config::prepare_codex_config_text_with_aggregate_model_catalog(
+                    &providers,
+                    &prepared_config,
+                )
+                .map_err(|e| format!("生成 Codex 聚合模型目录失败: {e}"))?
+                .unwrap_or(prepared_config)
+            };
             let live_config = if official_passthrough {
                 prepared_config
             } else {
@@ -7762,5 +7862,142 @@ experimental_bearer_token = "PROXY_MANAGED"
             .expect("read backup")
             .expect("backup exists");
         assert_eq!(backup.original_config, original_backup);
+    }
+
+    fn composite_claude_provider_fixture(id: &str, name: &str) -> Provider {
+        let mut provider = Provider::with_id(
+            id.to_string(),
+            name.to_string(),
+            json!({
+                "composite": {
+                    "members": [
+                        {"providerId": "a", "providerName": "来源A", "models": [
+                            {"model": "claude-sonnet-4", "displayName": "Sonnet 4"}
+                        ]},
+                        {"providerId": "b", "providerName": "来源B", "models": [
+                            {"model": "claude-opus-4", "displayName": "Opus 4"}
+                        ]}
+                    ]
+                }
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("composite".to_string()),
+            ..Default::default()
+        });
+        provider
+    }
+
+    #[test]
+    fn composite_claude_takeover_defaults_to_first_member_model() {
+        let provider = composite_claude_provider_fixture("comp", "复合");
+        let mut live_config = json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://stale.example.com",
+                "ANTHROPIC_AUTH_TOKEN": "sk-old",
+                "ANTHROPIC_MODEL": "stale-model",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "stale-opus"
+            }
+        });
+
+        ProxyService::apply_claude_takeover_fields_for_provider(
+            &mut live_config,
+            "http://127.0.0.1:15721",
+            &provider,
+        );
+
+        let env = live_config
+            .get("env")
+            .and_then(|value| value.as_object())
+            .expect("env should exist");
+        assert_eq!(
+            env.get("ANTHROPIC_BASE_URL").and_then(|v| v.as_str()),
+            Some("http://127.0.0.1:15721")
+        );
+        // 注入的第一个成员默认模型被接管管线转成稳定角色别名（ANTHROPIC_MODEL
+        // 本身被移除），真实模型名落在 *_NAME 显示字段；请求期的别名 → 真实
+        // 模型映射由被路由到的成员自身 env 在 forwarder 完成。
+        assert_eq!(
+            env.get("ANTHROPIC_MODEL").and_then(|v| v.as_str()),
+            None
+        );
+        assert_eq!(
+            env.get("ANTHROPIC_DEFAULT_OPUS_MODEL")
+                .and_then(|v| v.as_str()),
+            Some(CLAUDE_TAKEOVER_OPUS_MODEL)
+        );
+        assert_eq!(
+            env.get("ANTHROPIC_DEFAULT_OPUS_MODEL_NAME")
+                .and_then(|v| v.as_str()),
+            Some("claude-sonnet-4")
+        );
+        assert_eq!(
+            env.get("ANTHROPIC_AUTH_TOKEN")
+                .and_then(|v| v.as_str()),
+            Some(PROXY_TOKEN_PLACEHOLDER)
+        );
+    }
+
+    #[test]
+    fn composite_codex_takeover_sets_default_model_to_first_route() {
+        let provider = composite_claude_provider_fixture("comp", "复合");
+        let toml = ProxyService::apply_codex_proxy_toml_config_for_provider(
+            "model = \"stale-model\"\n",
+            "http://127.0.0.1:15721/codex/v1",
+            Some(&provider),
+        )
+        .expect("project toml");
+
+        assert!(toml.contains("base_url = \"http://127.0.0.1:15721/codex/v1\""));
+        assert!(toml.contains("model = \"ccs/a/claude-sonnet-4\""));
+    }
+
+    #[test]
+    fn composite_catalog_members_use_snapshot_models_and_order() {
+        let composite = composite_claude_provider_fixture("comp", "复合");
+        let mut member_b = Provider::with_id(
+            "b".to_string(),
+            "来源B".to_string(),
+            json!({"modelCatalog": {"models": [{"model": "live-b-model"}]}}),
+            None,
+        );
+        member_b.settings_config["modelCatalog"]["models"] = json!([{"model": "live-b-model"}]);
+        let mut member_a = Provider::with_id(
+            "a".to_string(),
+            "来源A".to_string(),
+            json!({"modelCatalog": {"models": [{"model": "live-a-model"}]}}),
+            None,
+        );
+        member_a.settings_config["modelCatalog"]["models"] = json!([{"model": "live-a-model"}]);
+        let unrelated = Provider::with_id(
+            "c".to_string(),
+            "无关".to_string(),
+            json!({"modelCatalog": {"models": [{"model": "c-model"}]}}),
+            None,
+        );
+
+        let members = ProxyService::composite_catalog_members(
+            &composite,
+            &[unrelated, member_b.clone(), member_a.clone()],
+        );
+
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0].id, "a");
+        assert_eq!(members[1].id, "b");
+        // 快照覆盖成员各自的 modelCatalog，保证 route id 与路由器一致。
+        assert_eq!(
+            members[0].settings_config["modelCatalog"]["models"],
+            json!([{"model": "claude-sonnet-4", "displayName": "Sonnet 4"}])
+        );
+        assert_eq!(
+            members[1].settings_config["modelCatalog"]["models"],
+            json!([{"model": "claude-opus-4", "displayName": "Opus 4"}])
+        );
+        // 原 DB 成员不受影响。
+        assert_eq!(
+            member_a.settings_config["modelCatalog"]["models"],
+            json!([{"model": "live-a-model"}])
+        );
     }
 }

@@ -8,6 +8,8 @@ pub struct AppState {
     pub db: Arc<Database>,
     pub proxy_service: ProxyService,
     pub usage_cache: Arc<UsageCache>,
+    /// 本地 MLX 服务管理器（Local LLM v4.0）
+    pub local: crate::local::LocalManager,
 }
 
 impl AppState {
@@ -19,6 +21,7 @@ impl AppState {
             db,
             proxy_service,
             usage_cache: Arc::new(UsageCache::new()),
+            local: crate::local::LocalManager::new(),
         }
     }
 }

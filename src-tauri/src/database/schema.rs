@@ -59,6 +59,28 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
+        // 2b. 本地 MLX 模型表（Local LLM v4.0）
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS local_models (
+                path TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                source TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                model_type TEXT,
+                quantization TEXT,
+                context_length INTEGER,
+                kv_bytes_per_token INTEGER,
+                has_tokenizer INTEGER NOT NULL DEFAULT 0,
+                has_chat_template INTEGER NOT NULL DEFAULT 0,
+                memory_fit TEXT NOT NULL DEFAULT 'comfortable',
+                verify_level INTEGER NOT NULL DEFAULT 0,
+                fingerprint TEXT,
+                last_used_at INTEGER
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
         // 3. MCP Servers 表
         conn.execute(
             "CREATE TABLE IF NOT EXISTS mcp_servers (

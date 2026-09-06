@@ -1,6 +1,6 @@
 import type { AppId } from "@/lib/api";
 import type { Provider } from "@/types";
-import { isOAuthProviderType } from "@/config/constants";
+import { isOAuthProviderType, PROVIDER_TYPES } from "@/config/constants";
 import {
   extractCodexWireApi,
   isCodexAnthropicWireApi,
@@ -40,6 +40,9 @@ export function providerNeedsRouting(
   provider: Provider,
 ): boolean {
   if (provider.category === "official") return false;
+
+  // 复合供应商：模型按成员路由，请求必须经过本地代理。
+  if (provider.meta?.providerType === PROVIDER_TYPES.COMPOSITE) return true;
 
   const isManagedOAuth = isOAuthProviderType(provider.meta?.providerType);
 

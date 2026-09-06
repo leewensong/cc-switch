@@ -7,6 +7,7 @@ use crate::config::{
 };
 use crate::error::AppError;
 use crate::model_capabilities::{image_input_capability_from_modalities, ImageInputCapability};
+use crate::provider::Provider;
 use once_cell::sync::OnceCell;
 use serde_json::{json, Value};
 use std::fs;
@@ -1376,6 +1377,135 @@ fn codex_model_catalog_from_settings(
     )))
 }
 
+/// Build a single Codex catalog containing request-level routes for all
+/// configured Codex providers.
+///
+/// The normal provider catalog remains the fallback for one-provider setups.
+/// Once at least two providers expose a model, this function gives each entry a
+/// stable `ccs/<provider-id>/<model>` slug and prefixes only its display name
+/// with the provider name. The proxy uses the same route table, so the catalog
+/// and request routing cannot drift apart.
+pub fn prepare_codex_config_text_with_aggregate_model_catalog(
+    providers: &[Provider],
+    config_text: &str,
+) -> Result<Option<String>, AppError> {
+    let mut entries = Vec::new();
+    let mut provider_ids = HashSet::new();
+    let mut seen_route_ids = HashSet::new();
+
+    for provider in providers {
+        let routes = crate::proxy::model_routes::provider_model_routes(provider);
+        if routes.is_empty() {
+            continue;
+        }
+
+        let mut settings = provider.settings_config.clone();
+        // `codex_model_catalog_from_settings` is also responsible for selecting
+        // the correct native/proxy template. Synthesize a one-row catalog for
+        // legacy providers that only have a top-level model.
+        let has_catalog = settings
+            .get("modelCatalog")
+            .and_then(|catalog| catalog.get("models"))
+            .and_then(Value::as_array)
+            .is_some_and(|models| !models.is_empty());
+        if !has_catalog {
+            let models: Vec<Value> = routes
+                .iter()
+                .map(|route| {
+                    json!({
+                        "model": route.upstream_model.as_str(),
+                        "displayName": route.display_name.as_str()
+                    })
+                })
+                .collect();
+            if let Some(root) = settings.as_object_mut() {
+                root.insert("modelCatalog".to_string(), json!({ "models": models }));
+            } else {
+                continue;
+            }
+        }
+
+        let provider_config_text = settings.get("config").and_then(Value::as_str).unwrap_or("");
+        let profile = crate::proxy::providers::resolve_codex_catalog_tool_profile(provider);
+        let Some(catalog) =
+            codex_model_catalog_from_settings(&settings, provider_config_text, profile)?
+        else {
+            continue;
+        };
+
+        let Some(models) = catalog.get("models").and_then(Value::as_array) else {
+            continue;
+        };
+
+        let mut provider_entry_count = 0usize;
+        for entry in models {
+            let Some(original_model) = entry.get("slug").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(route) = routes
+                .iter()
+                .find(|route| route.upstream_model == original_model)
+            else {
+                continue;
+            };
+            let route_id = crate::proxy::model_routes::route_id(&provider.id, original_model);
+            if !seen_route_ids.insert(route_id.clone()) {
+                continue;
+            }
+
+            let mut entry = entry.clone();
+            if let Some(entry_obj) = entry.as_object_mut() {
+                entry_obj.insert("slug".to_string(), Value::String(route_id));
+                entry_obj.insert(
+                    "display_name".to_string(),
+                    Value::String(route.display_name.clone()),
+                );
+                entry_obj.insert(
+                    "description".to_string(),
+                    Value::String(route.display_name.clone()),
+                );
+                entries.push(entry);
+                provider_entry_count += 1;
+            }
+        }
+
+        if provider_entry_count > 0 {
+            provider_ids.insert(provider.id.clone());
+        }
+    }
+
+    // Do not change the existing one-provider behavior. Aggregation is enabled
+    // only when at least two distinct providers contribute a model.
+    if provider_ids.len() < 2 || entries.is_empty() {
+        return Ok(None);
+    }
+
+    // Respect a user-managed external catalog. The normal per-provider
+    // projection has the same ownership rule; aggregation must not silently
+    // write a file that Codex is not allowed to read.
+    if config_text
+        .parse::<DocumentMut>()
+        .ok()
+        .and_then(|doc| {
+            doc.get("model_catalog_json")
+                .and_then(|item| item.as_str())
+                .map(|path| {
+                    Path::new(path).file_name().and_then(|name| name.to_str())
+                        != Some(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME)
+                })
+        })
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+
+    let catalog = json!({ "models": entries });
+    let catalog_path = get_codex_model_catalog_path();
+    let config_text = set_codex_model_catalog_json_field(config_text, Some(&catalog_path))?;
+    write_json_file(&catalog_path, &catalog)?;
+    Ok(Some(config_text))
+}
+
 fn set_codex_model_catalog_json_field(
     config_text: &str,
     catalog_path: Option<&Path>,
@@ -2493,6 +2623,9 @@ pub fn remove_codex_toml_base_url_if(toml_str: &str, predicate: impl Fn(&str) ->
 mod tests {
     use super::*;
     use serde_json::json;
+    use serial_test::serial;
+    use std::env;
+    use tempfile::TempDir;
 
     #[test]
     fn catalog_tool_profile_from_api_format() {
@@ -2512,6 +2645,65 @@ mod tests {
             CodexCatalogToolProfile::from_api_format(None),
             CodexCatalogToolProfile::ProxyChat
         );
+    }
+
+    #[test]
+    #[serial]
+    fn aggregate_catalog_uses_stable_route_slugs_and_provider_display_names() {
+        let home = TempDir::new().expect("temp home");
+        let old_home = env::var("HOME").ok();
+        let old_userprofile = env::var("USERPROFILE").ok();
+        let old_test_home = env::var("CC_SWITCH_TEST_HOME").ok();
+        env::set_var("HOME", home.path());
+        env::set_var("USERPROFILE", home.path());
+        env::set_var("CC_SWITCH_TEST_HOME", home.path());
+        crate::settings::reload_settings().expect("reload settings");
+
+        let provider = |id: &str, name: &str, model: &str| {
+            Provider::with_id(
+                id.to_string(),
+                name.to_string(),
+                json!({
+                    "config": "model_provider = \"custom\"\nmodel = \"gpt-5.6\"\n[model_providers.custom]\nwire_api = \"responses\"\n",
+                    "modelCatalog": {"models": [{"model": model, "displayName": "GPT-5.6"}]}
+                }),
+                None,
+            )
+        };
+        let providers = vec![
+            provider("a", "套餐 A", "gpt-5.6"),
+            provider("b", "套餐 B", "gpt-5.6"),
+        ];
+
+        let config = prepare_codex_config_text_with_aggregate_model_catalog(
+            &providers,
+            "model_provider = \"custom\"\nmodel = \"gpt-5.6\"\n",
+        )
+        .expect("aggregate catalog")
+        .expect("two providers should aggregate");
+        assert!(config.contains("model_catalog_json"));
+
+        let catalog_text = fs::read_to_string(get_codex_model_catalog_path()).expect("catalog");
+        let catalog: Value = serde_json::from_str(&catalog_text).expect("catalog json");
+        let models = catalog["models"].as_array().expect("models");
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0]["slug"], "ccs/a/gpt-5.6");
+        assert_eq!(models[0]["display_name"], "套餐 A · GPT-5.6");
+        assert_eq!(models[1]["slug"], "ccs/b/gpt-5.6");
+        assert_eq!(models[1]["display_name"], "套餐 B · GPT-5.6");
+
+        match old_home {
+            Some(value) => env::set_var("HOME", value),
+            None => env::remove_var("HOME"),
+        }
+        match old_userprofile {
+            Some(value) => env::set_var("USERPROFILE", value),
+            None => env::remove_var("USERPROFILE"),
+        }
+        match old_test_home {
+            Some(value) => env::set_var("CC_SWITCH_TEST_HOME", value),
+            None => env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
     }
 
     #[test]
