@@ -42,7 +42,8 @@ mod usage_script;
 
 pub use app_config::{AppType, InstalledSkill, McpApps, McpServer, MultiAppConfig, SkillApps};
 pub use codex_config::{
-    get_codex_auth_path, get_codex_config_path, read_codex_live_settings, write_codex_live_atomic,
+    extract_codex_experimental_bearer_token, get_codex_auth_path, get_codex_config_path,
+    read_codex_live_settings, write_codex_live_atomic,
 };
 pub use commands::open_provider_terminal;
 pub use commands::*;
@@ -72,6 +73,8 @@ pub use store::AppState;
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
+#[cfg(target_os = "windows")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fmt, sync::Arc};
 #[cfg(target_os = "macos")]
 use tauri::image::Image;
@@ -383,6 +386,22 @@ pub fn run() {
                 }
             }
         }));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let startup_page_handled = AtomicBool::new(false);
+        builder = builder.on_page_load(move |webview, payload| {
+            if webview.label() == "main"
+                && payload.event() == tauri::webview::PageLoadEvent::Finished
+                && payload.url().scheme() != "about"
+                && !startup_page_handled.swap(true, Ordering::Relaxed)
+                && !crate::settings::get_settings().silent_startup
+            {
+                let _ = webview.window().show();
+                log::info!("主页面加载完成，主窗口已显示");
+            }
+        });
     }
 
     let builder = builder
@@ -1182,13 +1201,11 @@ pub fn run() {
 
             // 初始化 CodexOAuthManager (ChatGPT Plus/Pro 反代)
             {
-                use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
                 use commands::CodexOAuthState;
-                use tokio::sync::RwLock;
 
-                let app_config_dir = crate::config::get_app_config_dir();
-                let codex_oauth_manager = CodexOAuthManager::new(app_config_dir);
-                app.manage(CodexOAuthState(Arc::new(RwLock::new(codex_oauth_manager))));
+                let codex_oauth_manager =
+                    app.state::<AppState>().codex_oauth_manager.clone();
+                app.manage(CodexOAuthState(codex_oauth_manager));
                 log::info!("✓ CodexOAuthManager initialized");
             }
 
@@ -1303,6 +1320,11 @@ pub fn run() {
                     const SESSION_SYNC_INTERVAL_SECS: u64 = 60;
 
                     async fn run_session_sync(db: std::sync::Arc<crate::database::Database>, backfill: bool) {
+                        // 手动扫描模式下跳过定时扫描；backfill 轮（启动首轮）仍进入，
+                        // 费用回填只修补数据库既有行（含代理记账行），不读会话文件
+                        if !backfill && !crate::settings::get_settings().session_auto_sync_enabled {
+                            return;
+                        }
                         let _guard = crate::services::session_usage::session_sync_mutex()
                             .lock()
                             .await;
@@ -1311,6 +1333,9 @@ pub fn run() {
                                 if let Err(error) = db.backfill_missing_usage_costs() {
                                     log::warn!("Usage cost startup backfill failed: {error}");
                                 }
+                            }
+                            if !crate::settings::get_settings().session_auto_sync_enabled {
+                                return crate::services::session_usage::SessionSyncResult::default();
                             }
                             crate::services::session_usage::sync_all_unlocked(&db)
                         });
@@ -1374,7 +1399,11 @@ pub fn run() {
                     log::info!("静默启动模式：主窗口已隐藏");
                 } else {
                     // 正常启动模式：显示窗口
+                    #[cfg(not(target_os = "windows"))]
                     let _ = window.show();
+                    #[cfg(target_os = "windows")]
+                    log::info!("正常启动模式：等待主页面加载完成后显示主窗口");
+                    #[cfg(not(target_os = "windows"))]
                     log::info!("正常启动模式：主窗口已显示");
 
                     // Linux: 解决首次启动 UI 无响应问题（Tauri #10746 + wry #637）。
@@ -1707,6 +1736,7 @@ pub fn run() {
             // Generic managed auth commands
             commands::auth_start_login,
             commands::auth_poll_for_account,
+            commands::auth_cancel_login,
             commands::auth_list_accounts,
             commands::auth_get_status,
             commands::auth_remove_account,
