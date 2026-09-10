@@ -53,29 +53,31 @@ export interface LocalModelRecord {
   lastUsedAt?: number;
 }
 
+// 字段名与 Rust `LocalSettings` 的 serde 输出一致（snake_case）：
+// 该结构体没有 `rename_all = "camelCase"`，settings 文件本身也是 snake_case。
 export interface LocalSettings {
-  schemaVersion: number;
-  pythonPath: string;
-  proxyPath: string;
-  selectedModelPath?: string;
-  customModelRoots: string[];
+  schema_version: number;
+  python_path: string;
+  proxy_path: string;
+  selected_model_path?: string;
+  custom_model_roots: string[];
   host: string;
-  mlxPort: number;
-  gatewayPort: number;
-  maxTokensFallback: number;
-  prefillStepSize: number;
-  automaticPromptCache: boolean;
-  promptCacheSize: number;
-  promptConcurrency: number;
-  decodeConcurrency: number;
-  upstreamTimeoutSecs: number;
+  mlx_port: number;
+  gateway_port: number;
+  max_tokens_fallback: number;
+  prefill_step_size: number;
+  automatic_prompt_cache: boolean;
+  prompt_cache_size: number;
+  prompt_concurrency: number;
+  decode_concurrency: number;
+  upstream_timeout_secs: number;
   /** 推理后端：mlx | ollama */
   backend?: string;
-  ollamaBaseUrl?: string;
-  ollamaModel?: string;
-  modelOverrides: Record<string, { contextBudget?: number; maxTokens?: number }>;
-  autoStartWithApp: boolean;
-  hiddenCards: Record<string, boolean>;
+  ollama_base_url?: string;
+  ollama_model?: string;
+  model_overrides: Record<string, { context_budget?: number; max_tokens?: number }>;
+  auto_start_with_app: boolean;
+  hidden_cards: Record<string, boolean>;
 }
 
 export const localApi = {

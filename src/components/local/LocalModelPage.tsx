@@ -430,12 +430,12 @@ export function LocalModelPage() {
                   </Label>
                   <Input
                     id="ollama-model"
-                    value={portSettings.ollamaModel}
+                    value={portSettings.ollama_model}
                     placeholder="qwen3.8:27b-mtp-q4_K_M"
                     onChange={(e) =>
                       setPortSettings({
                         ...portSettings,
-                        ollamaModel: e.target.value,
+                        ollama_model: e.target.value,
                       })
                     }
                   />
@@ -449,13 +449,13 @@ export function LocalModelPage() {
                 <Input
                   id="mlx-port"
                   type="number"
-                  value={portSettings.mlxPort}
+                  value={portSettings.mlx_port}
                   min={1024}
                   max={65535}
                   onChange={(e) =>
                     setPortSettings({
                       ...portSettings,
-                      mlxPort: Number(e.target.value),
+                      mlx_port: Number(e.target.value),
                     })
                   }
                 />
@@ -468,13 +468,13 @@ export function LocalModelPage() {
                 <Input
                   id="gw-port"
                   type="number"
-                  value={portSettings.gatewayPort}
+                  value={portSettings.gateway_port}
                   min={1024}
                   max={65535}
                   onChange={(e) =>
                     setPortSettings({
                       ...portSettings,
-                      gatewayPort: Number(e.target.value),
+                      gateway_port: Number(e.target.value),
                     })
                   }
                 />
