@@ -31,6 +31,6 @@ pub use coordinator::{LocalLogEntry, LocalManager, LocalServiceStatus, RuntimeSt
 pub use discovery::{discover_models, scan_root};
 pub use model::{LocalModelRecord, LocalModelSource, MemoryFit};
 pub use settings::{
-    detect_proxy_path, detect_python_path, load_local_settings, save_local_settings,
-    LocalSettings, LOCAL_SETTINGS_FILE,
+    detect_proxy_path, detect_python_path, load_local_settings, save_local_settings, LocalSettings,
+    LOCAL_SETTINGS_FILE,
 };

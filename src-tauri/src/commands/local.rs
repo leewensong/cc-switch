@@ -18,7 +18,9 @@ use tauri::{Manager, State};
 
 /// 列出本地模型（来自数据库；未扫描过的目录可先 rescan）。
 #[tauri::command]
-pub async fn local_models_list(state: State<'_, AppState>) -> Result<Vec<LocalModelRecord>, String> {
+pub async fn local_models_list(
+    state: State<'_, AppState>,
+) -> Result<Vec<LocalModelRecord>, String> {
     let db = state.db.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let rows = db.list_local_models().map_err(|e| e.to_string())?;
@@ -73,7 +75,11 @@ pub async fn local_models_add_root(
         let canonical_str = canonical.to_string_lossy().to_string();
 
         let mut settings = load_local_settings();
-        if !settings.custom_model_roots.iter().any(|r| r == &canonical_str) {
+        if !settings
+            .custom_model_roots
+            .iter()
+            .any(|r| r == &canonical_str)
+        {
             settings.custom_model_roots.push(canonical_str.clone());
             save_local_settings(&settings).map_err(|e| e.to_string())?;
         }
@@ -195,10 +201,7 @@ pub async fn local_service_test(app_handle: tauri::AppHandle) -> Result<String, 
         .ok_or_else(|| "应用状态不可用".to_string())?;
     let status = state.local.status().await;
     if status.state != RuntimeState::Ready {
-        return Err(format!(
-            "本地服务未就绪（当前状态：{}）",
-            status.state
-        ));
+        return Err(format!("本地服务未就绪（当前状态：{}）", status.state));
     }
     let settings = load_local_settings();
     let client = reqwest::Client::builder()
@@ -281,10 +284,7 @@ pub(crate) fn resolve_model(
     db: &crate::database::Database,
     model_path: &str,
 ) -> Result<LocalModelRecord, String> {
-    if let Some(model) = db
-        .get_local_model(model_path)
-        .map_err(|e| e.to_string())?
-    {
+    if let Some(model) = db.get_local_model(model_path).map_err(|e| e.to_string())? {
         return Ok(model);
     }
     let dir = Path::new(model_path);
@@ -322,9 +322,7 @@ pub async fn switch_to_local_provider(
             .await
             .map_err(|e| AppError::Message(format!("供应商切换任务执行失败: {e}")))?
         }
-        RuntimeState::Stopping => {
-            Err(AppError::Message("本地服务正在停止，请稍候".to_string()))
-        }
+        RuntimeState::Stopping => Err(AppError::Message("本地服务正在停止，请稍候".to_string())),
         state if state.is_starting() => {
             schedule_auto_switch(app_handle, app_type);
             Ok(switch_result_warning("local.starting_auto_switch"))
@@ -354,6 +352,7 @@ pub async fn switch_to_local_provider(
 fn switch_result_warning(code: &str) -> SwitchResult {
     SwitchResult {
         warnings: vec![code.to_string()],
+        route: None,
     }
 }
 
@@ -467,13 +466,19 @@ pub async fn local_service_diagnostics(
         .unwrap_or_default();
 
     let gateway_healthy = client
-        .get(format!("http://{}:{}/health", settings.host, settings.gateway_port))
+        .get(format!(
+            "http://{}:{}/health",
+            settings.host, settings.gateway_port
+        ))
         .send()
         .await
         .map(|r| r.status().is_success())
         .unwrap_or(false);
     let mlx_healthy = client
-        .get(format!("http://{}:{}/health", settings.host, settings.mlx_port))
+        .get(format!(
+            "http://{}:{}/health",
+            settings.host, settings.mlx_port
+        ))
         .send()
         .await
         .map(|r| r.status().is_success())
@@ -481,7 +486,10 @@ pub async fn local_service_diagnostics(
 
     let metrics = if gateway_healthy {
         let metrics_value = match client
-            .get(format!("http://{}:{}/studio/metrics", settings.host, settings.gateway_port))
+            .get(format!(
+                "http://{}:{}/studio/metrics",
+                settings.host, settings.gateway_port
+            ))
             .send()
             .await
         {
@@ -489,39 +497,62 @@ pub async fn local_service_diagnostics(
             Err(_) => None,
         };
         metrics_value.map(|v| GatewayMetrics {
-                uptime_seconds: v.get("uptime_seconds").and_then(|x| x.as_f64()).unwrap_or(0.0),
-                active_requests: v.get("active_requests").and_then(|x| x.as_u64()).unwrap_or(0),
-                total_requests: v.get("total_requests").and_then(|x| x.as_u64()).unwrap_or(0),
-                completed_requests: v.get("completed_requests").and_then(|x| x.as_u64()).unwrap_or(0),
-                failed_requests: v.get("failed_requests").and_then(|x| x.as_u64()).unwrap_or(0),
-                request_bytes_received: v.get("request_bytes_received").and_then(|x| x.as_u64()).unwrap_or(0),
-                response_bytes_sent: v.get("response_bytes_sent").and_then(|x| x.as_u64()).unwrap_or(0),
-                active: v
-                    .get("active")
-                    .and_then(|a| a.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|item| {
-                                Some(ActiveRequestInfo {
-                                    id: item.get("id")?.as_u64()?,
-                                    protocol: item
-                                        .get("protocol")
-                                        .and_then(|p| p.as_str())
-                                        .unwrap_or("?")
-                                        .to_string(),
-                                    streaming: item
-                                        .get("streaming")
-                                        .and_then(|s| s.as_bool())
-                                        .unwrap_or(false),
-                                    elapsed_seconds: item.get("elapsed_seconds").and_then(|e| e.as_f64()),
-                                    request_bytes: item.get("request_bytes").and_then(|b| b.as_u64()),
-                                    response_bytes: item.get("response_bytes").and_then(|b| b.as_u64()),
-                                })
+            uptime_seconds: v
+                .get("uptime_seconds")
+                .and_then(|x| x.as_f64())
+                .unwrap_or(0.0),
+            active_requests: v
+                .get("active_requests")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0),
+            total_requests: v
+                .get("total_requests")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0),
+            completed_requests: v
+                .get("completed_requests")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0),
+            failed_requests: v
+                .get("failed_requests")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0),
+            request_bytes_received: v
+                .get("request_bytes_received")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0),
+            response_bytes_sent: v
+                .get("response_bytes_sent")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0),
+            active: v
+                .get("active")
+                .and_then(|a| a.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| {
+                            Some(ActiveRequestInfo {
+                                id: item.get("id")?.as_u64()?,
+                                protocol: item
+                                    .get("protocol")
+                                    .and_then(|p| p.as_str())
+                                    .unwrap_or("?")
+                                    .to_string(),
+                                streaming: item
+                                    .get("streaming")
+                                    .and_then(|s| s.as_bool())
+                                    .unwrap_or(false),
+                                elapsed_seconds: item
+                                    .get("elapsed_seconds")
+                                    .and_then(|e| e.as_f64()),
+                                request_bytes: item.get("request_bytes").and_then(|b| b.as_u64()),
+                                response_bytes: item.get("response_bytes").and_then(|b| b.as_u64()),
                             })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
     } else {
         None
     };

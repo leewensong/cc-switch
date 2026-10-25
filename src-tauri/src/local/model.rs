@@ -27,7 +27,7 @@ impl LocalModelSource {
         }
     }
 
-    pub fn from_str(value: &str) -> Self {
+    pub fn from_value(value: &str) -> Self {
         match value {
             "lm_studio" => LocalModelSource::LmStudio,
             "hugging_face" => LocalModelSource::HuggingFace,
@@ -54,7 +54,7 @@ impl MemoryFit {
         }
     }
 
-    pub fn from_str(value: &str) -> Self {
+    pub fn from_value(value: &str) -> Self {
         match value {
             "tight" => MemoryFit::Tight,
             "too_large" => MemoryFit::TooLarge,
@@ -111,15 +111,15 @@ impl LocalModelRecord {
 
     /// 估算配置峰值（工作集 + 保留缓存上限）。
     pub fn estimated_configured_footprint_bytes(&self) -> i64 {
-        self.estimated_model_working_set_bytes()
-            + recommended_prompt_cache_bytes(self.size_bytes)
+        self.estimated_model_working_set_bytes() + recommended_prompt_cache_bytes(self.size_bytes)
     }
 }
 
 /// 内存适配分级（与 mlx-gateway-studio 的 memoryFit 一致）。
 pub fn classify_memory_fit(weight_bytes: i64) -> MemoryFit {
     let physical = physical_memory_bytes() as f64;
-    let estimate = (weight_bytes as f64 * 1.20) + 2.0 * 1_073_741_824.0
+    let estimate = (weight_bytes as f64 * 1.20)
+        + 2.0 * 1_073_741_824.0
         + recommended_prompt_cache_bytes(weight_bytes) as f64;
     if estimate < physical * 0.65 {
         MemoryFit::Comfortable
@@ -148,7 +148,7 @@ impl Database {
                 Ok(LocalModelRecord {
                     path: row.get(0)?,
                     name: row.get(1)?,
-                    source: LocalModelSource::from_str(&row.get::<_, String>(2)?),
+                    source: LocalModelSource::from_value(&row.get::<_, String>(2)?),
                     size_bytes: row.get(3)?,
                     model_type: row.get(4)?,
                     quantization: row.get(5)?,
@@ -156,7 +156,7 @@ impl Database {
                     kv_bytes_per_token: row.get(7)?,
                     has_tokenizer: row.get(8)?,
                     has_chat_template: row.get(9)?,
-                    memory_fit: MemoryFit::from_str(&row.get::<_, String>(10)?),
+                    memory_fit: MemoryFit::from_value(&row.get::<_, String>(10)?),
                     verify_level: row.get(11)?,
                     fingerprint: row.get(12)?,
                     last_used_at: row.get(13)?,
@@ -241,8 +241,7 @@ impl Database {
     /// 批量移除本地模型引用（按路径集合）。
     /// 清理不再被扫描到的模型记录（外部引用只删记录，不删磁盘文件）。
     pub fn prune_local_models_not_in(&self, keep_paths: &[String]) -> Result<(), AppError> {
-        let keep: HashMap<&str, ()> =
-            keep_paths.iter().map(|s| (s.as_str(), ())).collect();
+        let keep: HashMap<&str, ()> = keep_paths.iter().map(|s| (s.as_str(), ())).collect();
         let existing = self.list_local_models()?;
         for model in existing {
             if !keep.contains_key(model.path.as_str()) {
@@ -253,11 +252,7 @@ impl Database {
     }
 
     /// 更新模型验证等级。
-    pub fn set_local_model_verify_level(
-        &self,
-        path: &str,
-        level: u8,
-    ) -> Result<(), AppError> {
+    pub fn set_local_model_verify_level(&self, path: &str, level: u8) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
         conn.execute(
             "UPDATE local_models SET verify_level = ?1 WHERE path = ?2",

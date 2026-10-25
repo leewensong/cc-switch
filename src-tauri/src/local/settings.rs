@@ -229,7 +229,7 @@ pub fn recommended_prompt_cache_bytes(model_size_bytes: i64) -> i64 {
     let estimated_model_working_set = (model_size_bytes as f64 * 1.20) as i64 + 2 * gib;
     let available_headroom = (physical - estimated_model_working_set).max(0);
     let half_gib: i64 = 512 * 1_024 * 1_024;
-    let candidate = (8 * gib).min((1 * gib).max(available_headroom / 8));
+    let candidate = (8 * gib).min(gib.max(available_headroom / 8));
     (candidate / half_gib * half_gib).max(half_gib)
 }
 
@@ -312,8 +312,7 @@ pub fn detect_proxy_path() -> String {
 
     #[cfg(target_os = "macos")]
     {
-        let bundled = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("resources/anthropic-proxy");
+        let bundled = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/anthropic-proxy");
         if bundled.is_file() && is_executable(&bundled) {
             return bundled.to_string_lossy().to_string();
         }

@@ -14,9 +14,7 @@ use crate::database::Database;
 use crate::error::AppError;
 use crate::local::settings::LocalSettings;
 use crate::local::{GATEWAY_MODEL_ALIAS, LOCAL_AUTH_TOKEN, LOCAL_PROVIDER_ID, LOCAL_PROVIDER_NAME};
-use crate::provider::{
-    ClaudeDesktopMode, ClaudeDesktopModelRoute, Provider, ProviderMeta,
-};
+use crate::provider::{ClaudeDesktopMode, ClaudeDesktopModelRoute, Provider, ProviderMeta};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -98,17 +96,22 @@ pub fn build_local_provider(
             return Err(AppError::localized(
                 "local_provider.not_supported_yet",
                 format!("{} 的 Local 卡片将在下一里程碑提供", other.as_str()),
-                format!("Local provider for {} lands in the next milestone", other.as_str()),
+                format!(
+                    "Local provider for {} lands in the next milestone",
+                    other.as_str()
+                ),
             ));
         }
     };
 
-    let mut meta = ProviderMeta::default();
-    meta.provider_type = Some("local_mlx".to_string());
-    // 本地供应商不参与故障转移队列
-    meta.common_config_enabled = Some(false);
-    meta.claude_desktop_mode = desktop_mode;
-    meta.claude_desktop_model_routes = desktop_routes.unwrap_or_default();
+    let meta = ProviderMeta {
+        provider_type: Some("local_mlx".to_string()),
+        // 本地供应商不参与故障转移队列
+        common_config_enabled: Some(false),
+        claude_desktop_mode: desktop_mode,
+        claude_desktop_model_routes: desktop_routes.unwrap_or_default(),
+        ..Default::default()
+    };
 
     Ok(Provider {
         id: LOCAL_PROVIDER_ID.to_string(),

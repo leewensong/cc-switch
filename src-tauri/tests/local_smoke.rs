@@ -7,7 +7,7 @@
 //!   （默认走 `detect_python_path` / `detect_proxy_path` 探测链）
 
 use cc_switch_lib::local::{
-    detect_python_path, detect_proxy_path, discover_models, LocalManager, LocalSettings,
+    detect_proxy_path, detect_python_path, discover_models, LocalManager, LocalSettings,
     RuntimeState,
 };
 
@@ -24,10 +24,11 @@ fn local_chain_smoke() {
     rt.block_on(async {
         let manager = LocalManager::new();
 
-        let mut settings = LocalSettings::default();
-        settings.python_path =
-            env_or("LOCAL_SMOKE_PYTHON", &detect_python_path());
-        settings.proxy_path = env_or("LOCAL_SMOKE_PROXY", &detect_proxy_path());
+        let mut settings = LocalSettings {
+            python_path: env_or("LOCAL_SMOKE_PYTHON", &detect_python_path()),
+            proxy_path: env_or("LOCAL_SMOKE_PROXY", &detect_proxy_path()),
+            ..Default::default()
+        };
         assert!(
             !settings.python_path.is_empty(),
             "未探测到 Python 解释器（需要在 mlx_lm 同目录 .venv 或安装 mlx_lm）"
@@ -43,9 +44,9 @@ fn local_chain_smoke() {
         let mut model_path = env_or("LOCAL_SMOKE_MODEL", "");
         if model_path.is_empty() {
             // 默认：HF 缓存中的 Qwen3.8-27B MLX 4bit（本机测试模型）
-            let hf_root = dirs::home_dir()
-                .expect("home dir")
-                .join(".cache/huggingface/hub/models--lmstudio-community--Qwen3.8-27B-MLX-4bit/snapshots");
+            let hf_root = dirs::home_dir().expect("home dir").join(
+                ".cache/huggingface/hub/models--lmstudio-community--Qwen3.8-27B-MLX-4bit/snapshots",
+            );
             if let Ok(entries) = std::fs::read_dir(&hf_root) {
                 model_path = entries
                     .flatten()
@@ -67,10 +68,12 @@ fn local_chain_smoke() {
             .iter()
             .find(|m| m.path == model_path)
             .cloned()
-            .or_else(|| cc_switch_lib::local::discovery::parse_model_dir(
-                std::path::Path::new(&model_path),
-                cc_switch_lib::local::model::LocalModelSource::Custom,
-            ))
+            .or_else(|| {
+                cc_switch_lib::local::discovery::parse_model_dir(
+                    std::path::Path::new(&model_path),
+                    cc_switch_lib::local::model::LocalModelSource::Custom,
+                )
+            })
             .expect("模型目录可解析");
 
         // discovery 回归：HF 缓存权重是 symlink，真实大小必须 > 1GB（修复 symlink 大小 bug）
@@ -153,9 +156,11 @@ fn local_chain_smoke() {
 async fn start_rejects_non_macos() {
     // 非 macOS 平台启动应被拒绝（本测试在 macOS 上跑，验证语义分支：无效模型先报错）
     let manager = LocalManager::new();
-    let mut settings = LocalSettings::default();
-    settings.mlx_port = 8094;
-    settings.gateway_port = 8095;
+    let settings = LocalSettings {
+        mlx_port: 8094,
+        gateway_port: 8095,
+        ..Default::default()
+    };
     let model = cc_switch_lib::local::model::LocalModelRecord {
         path: "/nonexistent-model".to_string(),
         name: "nonexistent".to_string(),

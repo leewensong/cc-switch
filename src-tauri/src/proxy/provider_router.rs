@@ -44,22 +44,27 @@ impl ProviderRouter {
     /// - 故障转移关闭时：仅返回当前供应商
     /// - 故障转移开启时：仅使用故障转移队列，按队列顺序依次尝试（P1 → P2 → ...）
     pub async fn select_providers(&self, app_type: &str) -> Result<Vec<Provider>, AppError> {
+        // 代理模式下路由到代理路由那家，和直连指针无关。
+        let current_provider = AppType::from_str(app_type).ok().and_then(|app_enum| {
+            crate::mode::current::provider_in_use(&self.db, &app_enum)
+                .ok()
+                .flatten()
+        });
+        self.select_providers_with_current(app_type, current_provider)
+            .await
+    }
+
+    /// 同 [`Self::select_providers`]，正在用的那家由调用方给出：处理请求时上下文已经读过
+    /// 一次（要读 `live-state.json` 和这一行），不用每个请求再读一遍，两处用的也一定是
+    /// 同一家。
+    pub async fn select_providers_with_current(
+        &self,
+        app_type: &str,
+        current_provider: Option<Provider>,
+    ) -> Result<Vec<Provider>, AppError> {
         let mut result = Vec::new();
         let mut total_providers = 0usize;
         let mut circuit_open_count = 0usize;
-        let current_id = AppType::from_str(app_type)
-            .ok()
-            .and_then(|app_enum| {
-                crate::settings::get_effective_current_provider(&self.db, &app_enum)
-                    .ok()
-                    .flatten()
-            })
-            .or_else(|| self.db.get_current_provider(app_type).ok().flatten());
-        let current_provider = current_id
-            .as_deref()
-            .map(|id| self.db.get_provider_by_id(id, app_type))
-            .transpose()?
-            .flatten();
 
         // 检查该应用的自动故障转移开关是否开启（从 proxy_config 表读取）
         let auto_failover_enabled = match self.db.get_proxy_config_for_app(app_type).await {
@@ -146,8 +151,12 @@ impl ProviderRouter {
         &self,
         app_type: &str,
         request_model: &str,
+        current_provider: Option<Provider>,
     ) -> Result<(Vec<Provider>, Option<ModelRoute>), AppError> {
-        let providers = match self.select_providers(app_type).await {
+        let providers = match self
+            .select_providers_with_current(app_type, current_provider)
+            .await
+        {
             Ok(providers) => {
                 if providers.first().map(model_routes::is_composite) == Some(true) {
                     return self.select_for_composite(app_type, &providers, request_model);
@@ -176,12 +185,15 @@ impl ProviderRouter {
                 ))
             },
         )?;
-        let provider = all_providers.get(&route.provider_id).cloned().ok_or_else(|| {
-            AppError::InvalidInput(format!(
-                "模型路由 {} 指向的供应商不存在: {}",
-                route.route_id, route.provider_id
-            ))
-        })?;
+        let provider = all_providers
+            .get(&route.provider_id)
+            .cloned()
+            .ok_or_else(|| {
+                AppError::InvalidInput(format!(
+                    "模型路由 {} 指向的供应商不存在: {}",
+                    route.route_id, route.provider_id
+                ))
+            })?;
         Ok((vec![provider], Some(route)))
     }
 
@@ -198,7 +210,7 @@ impl ProviderRouter {
         let composite = selected
             .iter()
             .find(|provider| model_routes::is_composite(provider))
-            .ok_or_else(|| AppError::NoProvidersConfigured)?;
+            .ok_or(AppError::NoProvidersConfigured)?;
         let member_ids = model_routes::composite_member_ids(composite);
 
         let all_providers = self.db.get_all_providers(app_type)?;
@@ -522,10 +534,8 @@ mod tests {
         let _home = TempHome::new();
         let db = Arc::new(Database::memory().unwrap());
 
-        let member_a =
-            Provider::with_id("a".to_string(), "来源A".to_string(), json!({}), None);
-        let member_b =
-            Provider::with_id("b".to_string(), "来源B".to_string(), json!({}), None);
+        let member_a = Provider::with_id("a".to_string(), "来源A".to_string(), json!({}), None);
+        let member_b = Provider::with_id("b".to_string(), "来源B".to_string(), json!({}), None);
         let mut composite = Provider::with_id(
             "comp".to_string(),
             "复合".to_string(),
@@ -547,9 +557,12 @@ mod tests {
         db.save_provider("claude", &composite).unwrap();
         db.set_current_provider("claude", "comp").unwrap();
 
+        // 复合供应商只有在它是当前供应商时才会接管路由：调用方（请求上下文）读到的
+        // 当前供应商原样传进来。
+        let current = db.get_provider_by_id("comp", "claude").unwrap();
         let router = ProviderRouter::new(db);
         let (providers, route) = router
-            .select_providers_for_model("claude", "ccs/b/claude-opus-4")
+            .select_providers_for_model("claude", "ccs/b/claude-opus-4", current)
             .await
             .unwrap();
         let route = route.expect("composite route");
@@ -567,10 +580,8 @@ mod tests {
         let _home = TempHome::new();
         let db = Arc::new(Database::memory().unwrap());
 
-        let member_a =
-            Provider::with_id("a".to_string(), "来源A".to_string(), json!({}), None);
-        let member_b =
-            Provider::with_id("b".to_string(), "来源B".to_string(), json!({}), None);
+        let member_a = Provider::with_id("a".to_string(), "来源A".to_string(), json!({}), None);
+        let member_b = Provider::with_id("b".to_string(), "来源B".to_string(), json!({}), None);
         let mut composite = Provider::with_id(
             "comp".to_string(),
             "复合".to_string(),
@@ -592,9 +603,10 @@ mod tests {
         db.save_provider("claude", &composite).unwrap();
         db.set_current_provider("claude", "comp").unwrap();
 
+        let current = db.get_provider_by_id("comp", "claude").unwrap();
         let router = ProviderRouter::new(db);
         let (providers, route) = router
-            .select_providers_for_model("claude", "claude-sonnet-4")
+            .select_providers_for_model("claude", "claude-sonnet-4", current)
             .await
             .unwrap();
         let route = route.expect("composite fallback route");
@@ -637,7 +649,7 @@ mod tests {
         // selects it, because model routing is independent from global failover.
         let router = ProviderRouter::new(db);
         let (providers, route) = router
-            .select_providers_for_model("codex", "ccs/b/gpt-5.6")
+            .select_providers_for_model("codex", "ccs/b/gpt-5.6", None)
             .await
             .unwrap();
 
@@ -662,7 +674,7 @@ mod tests {
 
         let router = ProviderRouter::new(db);
         let error = router
-            .select_providers_for_model("codex", "ccs/a/missing")
+            .select_providers_for_model("codex", "ccs/a/missing", None)
             .await
             .expect_err("unknown route must fail");
         assert!(matches!(error, AppError::InvalidInput(_)));

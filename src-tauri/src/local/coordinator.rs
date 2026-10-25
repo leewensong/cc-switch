@@ -13,10 +13,10 @@ use crate::local::settings::{load_local_settings, recommended_prompt_cache_bytes
 use crate::local::{LOCAL_AUTO_SWITCH_EVENT, LOCAL_STATUS_EVENT};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tauri::Emitter;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -202,7 +202,9 @@ impl LocalManager {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(20)).await;
                 let (ready, base_url) = {
-                    let Ok(guard) = manager.slot.lock() else { continue };
+                    let Ok(guard) = manager.slot.lock() else {
+                        continue;
+                    };
                     (
                         guard.status.state == RuntimeState::Ready,
                         guard.status.base_url.clone(),
@@ -280,7 +282,9 @@ impl LocalManager {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 let (ready, base_url) = {
-                    let Ok(guard) = manager.slot.lock() else { continue };
+                    let Ok(guard) = manager.slot.lock() else {
+                        continue;
+                    };
                     (
                         guard.status.state == RuntimeState::Ready,
                         guard.status.base_url.clone(),
@@ -300,7 +304,11 @@ impl LocalManager {
                     }
                     continue;
                 }
-                let Ok(resp) = client.get(format!("{base_url}/studio/metrics")).send().await else {
+                let Ok(resp) = client
+                    .get(format!("{base_url}/studio/metrics"))
+                    .send()
+                    .await
+                else {
                     continue;
                 };
                 let Ok(value) = resp.json::<serde_json::Value>().await else {
@@ -313,7 +321,9 @@ impl LocalManager {
                     .min(u32::MAX as u64) as u32;
                 let mut changed = false;
                 {
-                    let Ok(mut guard) = manager.slot.lock() else { continue };
+                    let Ok(mut guard) = manager.slot.lock() else {
+                        continue;
+                    };
                     if guard.status.active_requests != Some(active) {
                         guard.status.active_requests = Some(active);
                         changed = true;
@@ -430,7 +440,10 @@ impl LocalManager {
         }
 
         let (current_state, current_model) = {
-            let guard = self.slot.lock().map_err(|_| "本地服务状态不可用".to_string())?;
+            let guard = self
+                .slot
+                .lock()
+                .map_err(|_| "本地服务状态不可用".to_string())?;
             (guard.status.state, guard.status.model_path.clone())
         };
 
@@ -453,7 +466,10 @@ impl LocalManager {
         let manager = self.clone();
         let stop_flag = Arc::new(AtomicBool::new(false));
         {
-            let mut guard = self.slot.lock().map_err(|_| "本地服务状态不可用".to_string())?;
+            let mut guard = self
+                .slot
+                .lock()
+                .map_err(|_| "本地服务状态不可用".to_string())?;
             guard.stop_flag = stop_flag.clone();
             guard.operation = None;
         }
@@ -506,7 +522,9 @@ impl LocalManager {
     ) {
         log::info!(
             "[local] run() 开始: model={}, mlx_port={}, gateway_port={}",
-            model.path, settings.mlx_port, settings.gateway_port
+            model.path,
+            settings.mlx_port,
+            settings.gateway_port
         );
         if stop_flag.load(Ordering::SeqCst) {
             log::info!("[local] run() stop_flag 已置位，直接停止");
@@ -568,13 +586,17 @@ impl LocalManager {
                 .wait_for_health(&settings, settings.mlx_port, 120, &stop_flag, "MLX")
                 .await
             {
-                self.finish_failed(&stop_flag, "等待 MLX 服务就绪超时或进程退出".to_string()).await;
+                self.finish_failed(&stop_flag, "等待 MLX 服务就绪超时或进程退出".to_string())
+                    .await;
                 return;
             }
             log::info!("[local] MLX 健康检查通过，进入预热");
 
             // 阶段 3：预热（权重加载 + 最小推理）
-            self.set_phase(RuntimeState::WarmingUp, "加载权重并执行最小预热请求".to_string());
+            self.set_phase(
+                RuntimeState::WarmingUp,
+                "加载权重并执行最小预热请求".to_string(),
+            );
             log::info!("[local] 发送预热请求 {}...", settings.mlx_base_url());
             if let Err(err) = self.warmup(&settings, &stop_flag).await {
                 log::error!("[local] 预热失败: {err}");
@@ -605,7 +627,8 @@ impl LocalManager {
             .wait_for_health(&settings, settings.gateway_port, 30, &stop_flag, "Gateway")
             .await
         {
-            self.finish_failed(&stop_flag, "等待网关就绪超时".to_string()).await;
+            self.finish_failed(&stop_flag, "等待网关就绪超时".to_string())
+                .await;
             return;
         }
 
@@ -715,7 +738,10 @@ impl LocalManager {
     }
 
     fn validate(&self, settings: &LocalSettings, model: &LocalModelRecord) -> Result<(), String> {
-        if !std::path::Path::new(&model.path).join("config.json").is_file() {
+        if !std::path::Path::new(&model.path)
+            .join("config.json")
+            .is_file()
+        {
             return Err(format!("模型目录不可用：{}", model.path));
         }
         if crate::local::settings::is_tcc_protected_path(std::path::Path::new(&model.path)) {
@@ -730,11 +756,16 @@ impl LocalManager {
             return Err("未找到 Python 解释器（需要 mlx_lm），请在设置中配置".to_string());
         }
         if !std::path::Path::new(&settings.python_path).is_file() {
-            return Err(format!("找不到 Python 可执行文件：{}", settings.python_path));
+            return Err(format!(
+                "找不到 Python 可执行文件：{}",
+                settings.python_path
+            ));
         }
         // TCC：Documents/Desktop/Downloads 下的 venv 会让 app 派生进程阻塞在
         // open()（python 启动即读 pyvenv.cfg），直接给出可操作的错误。
-        if crate::local::settings::is_tcc_protected_path(std::path::Path::new(&settings.python_path)) {
+        if crate::local::settings::is_tcc_protected_path(std::path::Path::new(
+            &settings.python_path,
+        )) {
             return Err(
                 "Python 解释器位于 macOS 受保护目录（Documents/Desktop/Downloads）下：\
                  未授权应用访问时系统会阻塞进程启动。\
@@ -763,7 +794,10 @@ impl LocalManager {
         settings: &LocalSettings,
     ) -> Result<Child, String> {
         let overrides = settings.effective_overrides(&model.path);
-        let max_tokens = overrides.max_tokens.unwrap_or(settings.max_tokens_fallback).max(1);
+        let max_tokens = overrides
+            .max_tokens
+            .unwrap_or(settings.max_tokens_fallback)
+            .max(1);
         // prompt cache 关闭（确定配置）：cache+stream 在 16K+ 上下文级仍会卡死
         // （8K 正常/16K 卡死，边界不可控）；无 cache 时 135KB 流式请求 239s 首字节可用。
         let _ = recommended_prompt_cache_bytes(model.size_bytes);
@@ -820,12 +854,19 @@ impl LocalManager {
             {
                 log::info!("[local] 端口 {} 已回收，继续启动", settings.mlx_port);
             } else {
-                log::error!("[local] 端口 {} 已被占用（非自有实例或回收失败）", settings.mlx_port);
+                log::error!(
+                    "[local] 端口 {} 已被占用（非自有实例或回收失败）",
+                    settings.mlx_port
+                );
                 return Err(format!("端口 {} 已被占用", settings.mlx_port));
             }
         }
 
-        log::info!("[local] spawn mlx_lm.server: {} {}", settings.python_path, args.join(" "));
+        log::info!(
+            "[local] spawn mlx_lm.server: {} {}",
+            settings.python_path,
+            args.join(" ")
+        );
         let mut child = command
             .spawn()
             .map_err(|e| format!("启动 mlx_lm.server 失败：{e}"))?;
@@ -841,9 +882,15 @@ impl LocalManager {
         let port = settings.gateway_port.to_string();
         // ollama 后端：上游指向 ollama OpenAI API，模型名映射为 ollama tag
         let (upstream_base, model_alias) = if settings.backend == "ollama" {
-            (format!("{}/v1", settings.ollama_base_url), settings.ollama_model.clone())
+            (
+                format!("{}/v1", settings.ollama_base_url),
+                settings.ollama_model.clone(),
+            )
         } else {
-            (format!("{}/v1", settings.mlx_base_url()), crate::local::GATEWAY_MODEL_ALIAS.to_string())
+            (
+                format!("{}/v1", settings.mlx_base_url()),
+                crate::local::GATEWAY_MODEL_ALIAS.to_string(),
+            )
         };
         let mut command = Command::new(&settings.proxy_path);
         command
@@ -861,22 +908,30 @@ impl LocalManager {
             .kill_on_drop(false);
         self.apply_common_env(&mut command);
 
-        if !self.port_listener_pids(settings.gateway_port).await.is_empty() {
+        if !self
+            .port_listener_pids(settings.gateway_port)
+            .await
+            .is_empty()
+        {
             if self
                 .reclaim_own_orphans(settings.gateway_port, "anthropic-proxy")
                 .await
-                && self.port_listener_pids(settings.gateway_port).await.is_empty()
+                && self
+                    .port_listener_pids(settings.gateway_port)
+                    .await
+                    .is_empty()
             {
                 log::info!("[local] 端口 {} 已回收，继续启动", settings.gateway_port);
             } else {
-                log::error!("[local] 端口 {} 已被占用（非自有实例或回收失败）", settings.gateway_port);
+                log::error!(
+                    "[local] 端口 {} 已被占用（非自有实例或回收失败）",
+                    settings.gateway_port
+                );
                 return Err(format!("端口 {} 已被占用", settings.gateway_port));
             }
         }
 
-        let mut child = command
-            .spawn()
-            .map_err(|e| format!("启动网关失败：{e}"))?;
+        let mut child = command.spawn().map_err(|e| format!("启动网关失败：{e}"))?;
         let pid = child.id().unwrap_or(0);
         self.pipe_output(&mut child, "gateway");
         self.push_owned_log("app", "info", format!("网关已启动，PID {pid}"));
@@ -928,8 +983,13 @@ impl LocalManager {
     /// 查询网关活跃请求（/studio/metrics）——看门狗区分"忙碌"与"卡死"。
     async fn gateway_has_active_request(&self) -> bool {
         let (ready, base_url) = {
-            let Ok(guard) = self.slot.lock() else { return false };
-            (guard.status.state == RuntimeState::Ready, guard.status.base_url.clone())
+            let Ok(guard) = self.slot.lock() else {
+                return false;
+            };
+            (
+                guard.status.state == RuntimeState::Ready,
+                guard.status.base_url.clone(),
+            )
         };
         if !ready {
             return false;
@@ -940,7 +1000,11 @@ impl LocalManager {
             .no_proxy()
             .build()
             .unwrap_or_default();
-        match client.get(format!("{base_url}/studio/metrics")).send().await {
+        match client
+            .get(format!("{base_url}/studio/metrics"))
+            .send()
+            .await
+        {
             Ok(resp) => match resp.json::<serde_json::Value>().await {
                 Ok(v) => v
                     .get("active_requests")
@@ -1001,7 +1065,7 @@ impl LocalManager {
             if killed {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
-            return killed;
+            killed
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
@@ -1024,11 +1088,11 @@ impl LocalManager {
             else {
                 return Vec::new();
             };
-            return String::from_utf8_lossy(&output.stdout)
+            String::from_utf8_lossy(&output.stdout)
                 .lines()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
-                .collect();
+                .collect()
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
@@ -1085,7 +1149,10 @@ impl LocalManager {
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
-            return Err(format!("ollama 预热失败（HTTP {status}）：{}", truncate_pub(&text, 300)));
+            return Err(format!(
+                "ollama 预热失败（HTTP {status}）：{}",
+                truncate_pub(&text, 300)
+            ));
         }
         Ok(())
     }
@@ -1117,11 +1184,17 @@ impl LocalManager {
             match client.get(&url).send().await {
                 Ok(resp) => {
                     if resp.status().is_success() {
-                        log::info!("[local] {name} 健康检查通过（第 {attempts} 次，HTTP {}）", resp.status());
+                        log::info!(
+                            "[local] {name} 健康检查通过（第 {attempts} 次，HTTP {}）",
+                            resp.status()
+                        );
                         self.push_owned_log("app", "info", format!("{name} 健康检查通过"));
                         return true;
                     }
-                    log::warn!("[local] {name} 健康检查第 {attempts} 次: HTTP {}", resp.status());
+                    log::warn!(
+                        "[local] {name} 健康检查第 {attempts} 次: HTTP {}",
+                        resp.status()
+                    );
                 }
                 Err(e) => {
                     if attempts <= 5 || attempts % 10 == 0 {
@@ -1194,7 +1267,10 @@ impl LocalManager {
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
-            return Err(format!("模型预热失败（HTTP {status}）：{}", truncate_pub(&text, 500)));
+            return Err(format!(
+                "模型预热失败（HTTP {status}）：{}",
+                truncate_pub(&text, 500)
+            ));
         }
         self.push_owned_log("app", "info", "模型预热完成".to_string());
         Ok(())

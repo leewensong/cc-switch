@@ -36,28 +36,43 @@ type MemberModelsState =
 function codexMemberModels(provider: Provider) {
   const config = provider.settingsConfig as Record<string, unknown>;
   const catalogModels = (
-    config?.modelCatalog as { models?: { model?: string; displayName?: string; display_name?: string }[] } | undefined
+    config?.modelCatalog as
+      | {
+          models?: {
+            model?: string;
+            displayName?: string;
+            display_name?: string;
+          }[];
+        }
+      | undefined
   )?.models;
 
   const models = Array.isArray(catalogModels)
     ? catalogModels
         .map((entry) => {
-          const model = typeof entry?.model === "string" ? entry.model.trim() : "";
+          const model =
+            typeof entry?.model === "string" ? entry.model.trim() : "";
           if (!model) return null;
           const displayName =
-            (typeof entry?.displayName === "string" && entry.displayName.trim()) ||
-            (typeof entry?.display_name === "string" && entry.display_name.trim()) ||
+            (typeof entry?.displayName === "string" &&
+              entry.displayName.trim()) ||
+            (typeof entry?.display_name === "string" &&
+              entry.display_name.trim()) ||
             model;
           return { model, displayName };
         })
-        .filter((entry): entry is { model: string; displayName: string } => entry !== null)
+        .filter(
+          (entry): entry is { model: string; displayName: string } =>
+            entry !== null,
+        )
     : [];
 
   if (models.length > 0) return models;
 
   const topLevelModel =
     typeof config?.model === "string" ? config.model.trim() : "";
-  if (topLevelModel) return [{ model: topLevelModel, displayName: topLevelModel }];
+  if (topLevelModel)
+    return [{ model: topLevelModel, displayName: topLevelModel }];
 
   const configModel = extractCodexModelName(
     typeof config?.config === "string" ? config.config : undefined,
@@ -118,9 +133,12 @@ export function CompositeProviderDialog({
       }
 
       const config = provider.settingsConfig as Record<string, unknown>;
-      const baseUrl =
-        (config?.env as Record<string, unknown> | undefined)?.ANTHROPIC_BASE_URL;
-      const apiKey = getApiKeyFromConfig(JSON.stringify(provider.settingsConfig), "claude");
+      const baseUrl = (config?.env as Record<string, unknown> | undefined)
+        ?.ANTHROPIC_BASE_URL;
+      const apiKey = getApiKeyFromConfig(
+        JSON.stringify(provider.settingsConfig),
+        "claude",
+      );
 
       if (typeof baseUrl !== "string" || !baseUrl.trim() || !apiKey) {
         setMemberModels((prev) => ({
@@ -222,11 +240,21 @@ export function CompositeProviderDialog({
       });
       onOpenChange(false);
     } catch (error) {
-      console.error("[CompositeProviderDialog] Failed to create composite", error);
+      console.error(
+        "[CompositeProviderDialog] Failed to create composite",
+        error,
+      );
     } finally {
       setIsSubmitting(false);
     }
-  }, [canSubmit, name, selectedProviders, memberModels, onSubmit, onOpenChange]);
+  }, [
+    canSubmit,
+    name,
+    selectedProviders,
+    memberModels,
+    onSubmit,
+    onOpenChange,
+  ]);
 
   const totalModels = selectedProviders.reduce(
     (sum, provider) => sum + (memberModels[provider.id]?.models.length ?? 0),
@@ -280,7 +308,10 @@ export function CompositeProviderDialog({
             const disabled = !isSelected && selectedIds.length >= MAX_MEMBERS;
             const state = memberModels[provider.id];
             return (
-              <div key={provider.id} className="flex items-center gap-3 px-3 py-2.5">
+              <div
+                key={provider.id}
+                className="flex items-center gap-3 px-3 py-2.5"
+              >
                 <Checkbox
                   checked={isSelected}
                   disabled={disabled}
@@ -288,7 +319,9 @@ export function CompositeProviderDialog({
                   aria-label={provider.name}
                 />
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm font-medium truncate">{provider.name}</div>
+                  <div className="text-sm font-medium truncate">
+                    {provider.name}
+                  </div>
                   {isSelected && state && (
                     <div className="text-xs text-muted-foreground flex items-center gap-1.5">
                       {state.status === "loading" && (

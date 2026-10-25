@@ -75,42 +75,35 @@ export interface LocalSettings {
   backend?: string;
   ollama_base_url?: string;
   ollama_model?: string;
-  model_overrides: Record<string, { context_budget?: number; max_tokens?: number }>;
+  model_overrides: Record<
+    string,
+    { context_budget?: number; max_tokens?: number }
+  >;
   auto_start_with_app: boolean;
   hidden_cards: Record<string, boolean>;
 }
 
 export const localApi = {
-  listModels: () =>
-    invoke<LocalModelRecord[]>("local_models_list"),
-  rescan: () =>
-    invoke<LocalModelRecord[]>("local_models_rescan"),
-  addRoot: (path: string) =>
-    invoke<number>("local_models_add_root", { path }),
+  listModels: () => invoke<LocalModelRecord[]>("local_models_list"),
+  rescan: () => invoke<LocalModelRecord[]>("local_models_rescan"),
+  addRoot: (path: string) => invoke<number>("local_models_add_root", { path }),
   removeRoot: (path: string) =>
     invoke<void>("local_models_remove_root", { path }),
   removeRef: (path: string) =>
     invoke<void>("local_models_remove_ref", { path }),
   start: (modelPath: string) =>
     invoke<LocalServiceStatus>("local_service_start", { modelPath }),
-  stop: () =>
-    invoke<LocalServiceStatus>("local_service_stop"),
-  status: () =>
-    invoke<LocalServiceStatus>("local_service_status"),
+  stop: () => invoke<LocalServiceStatus>("local_service_stop"),
+  status: () => invoke<LocalServiceStatus>("local_service_status"),
   logs: (sinceId: number) =>
     invoke<LocalLogEntry[]>("local_service_logs", { sinceId }),
-  clearLogs: () =>
-    invoke<void>("local_service_clear_logs"),
-  test: () =>
-    invoke<string>("local_service_test"),
-  getSettings: () =>
-    invoke<LocalSettings>("local_settings_get"),
+  clearLogs: () => invoke<void>("local_service_clear_logs"),
+  test: () => invoke<string>("local_service_test"),
+  getSettings: () => invoke<LocalSettings>("local_settings_get"),
   setSettings: (settings: LocalSettings) =>
     invoke<void>("local_settings_set", { settings }),
-  getSettingsPath: () =>
-    invoke<string>("get_local_settings_path"),
-  diagnostics: () =>
-    invoke<LocalDiagnostics>("local_service_diagnostics"),
+  getSettingsPath: () => invoke<string>("get_local_settings_path"),
+  diagnostics: () => invoke<LocalDiagnostics>("local_service_diagnostics"),
 };
 
 export interface ActiveRequestInfo {
@@ -147,7 +140,9 @@ export function isLocalRuntimeRunning(state: LocalRuntimeState): boolean {
 }
 
 export function isLocalRuntimeStarting(state: LocalRuntimeState): boolean {
-  return ["validating", "startingMlx", "warmingUp", "startingGateway"].includes(state);
+  return ["validating", "startingMlx", "warmingUp", "startingGateway"].includes(
+    state,
+  );
 }
 
 /** 是否为 Local MLX 供应商卡片。 */
@@ -156,8 +151,7 @@ export function isLocalProvider(provider: {
   meta?: { providerType?: string };
 }): boolean {
   return (
-    provider.id === "local-mlx" ||
-    provider.meta?.providerType === "local_mlx"
+    provider.id === "local-mlx" || provider.meta?.providerType === "local_mlx"
   );
 }
 

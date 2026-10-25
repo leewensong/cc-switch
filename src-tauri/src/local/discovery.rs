@@ -163,13 +163,9 @@ pub fn parse_model_dir(directory: &Path, source: LocalModelSource) -> Option<Loc
     let quantization = quantization_bits(&json)
         .map(|bits| format!("{bits}-bit"))
         .unwrap_or_else(|| infer_quantization(&canonical));
-    let has_tokenizer = [
-        "tokenizer.json",
-        "tokenizer.model",
-        "tokenizer_config.json",
-    ]
-    .iter()
-    .any(|name| canonical.join(name).is_file());
+    let has_tokenizer = ["tokenizer.json", "tokenizer.model", "tokenizer_config.json"]
+        .iter()
+        .any(|name| canonical.join(name).is_file());
     let has_chat_template = chat_template_exists(&canonical);
 
     // M0 过滤：只有带 tokenizer + chat template 的对话模型入模型库

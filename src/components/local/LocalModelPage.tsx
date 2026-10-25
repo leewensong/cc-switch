@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { Loader2, Play, Square, RefreshCw, FolderPlus, Trash2, Cpu } from "lucide-react";
+import {
+  Loader2,
+  Play,
+  Square,
+  RefreshCw,
+  FolderPlus,
+  Trash2,
+  Cpu,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -92,7 +100,10 @@ export function LocalModelPage() {
 
   useEffect(() => {
     void refreshStatus();
-    void localApi.getSettings().then(setPortSettings).catch(() => undefined);
+    void localApi
+      .getSettings()
+      .then(setPortSettings)
+      .catch(() => undefined);
     // 打开页面即扫描一次（扫描结果 = 权威集合；后台执行不阻塞 UI）
     void (async () => {
       try {
@@ -125,7 +136,10 @@ export function LocalModelPage() {
 
   useEffect(() => {
     const timer = setInterval(() => {
-      void localApi.diagnostics().then(setDiag).catch(() => undefined);
+      void localApi
+        .diagnostics()
+        .then(setDiag)
+        .catch(() => undefined);
     }, 2000);
     return () => clearInterval(timer);
   }, []);
@@ -137,9 +151,13 @@ export function LocalModelPage() {
     }
   }, [logs]);
 
-  const busyState = ["validating", "startingMlx", "warmingUp", "startingGateway", "stopping"].includes(
-    status.state,
-  );
+  const busyState = [
+    "validating",
+    "startingMlx",
+    "warmingUp",
+    "startingGateway",
+    "stopping",
+  ].includes(status.state);
 
   const handleStart = async (modelPath?: string) => {
     const target = modelPath ?? status.modelPath;
@@ -239,7 +257,11 @@ export function LocalModelPage() {
     }
     return (
       <Button onClick={() => void handleStart()} disabled={busy || busyState}>
-        {busyState ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Play className="w-4 h-4 mr-2" />}
+        {busyState ? (
+          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+        ) : (
+          <Play className="w-4 h-4 mr-2" />
+        )}
         {busyState ? t("localModel.starting") : t("localModel.startService")}
       </Button>
     );
@@ -253,7 +275,10 @@ export function LocalModelPage() {
           <CardTitle className="text-base flex items-center gap-2">
             <Cpu className="w-4 h-4" />
             {t("localModel.title")}
-            <Badge variant="secondary" className={cn(STATE_COLOR[status.state])}>
+            <Badge
+              variant="secondary"
+              className={cn(STATE_COLOR[status.state])}
+            >
               {t(`localModel.state.${status.state}`)}
             </Badge>
           </CardTitle>
@@ -268,9 +293,13 @@ export function LocalModelPage() {
         </CardHeader>
         <CardContent className="space-y-2 text-sm">
           <div className="flex flex-wrap gap-x-6 gap-y-1">
-            <span className="text-muted-foreground">{t("localModel.currentModel")}:</span>
+            <span className="text-muted-foreground">
+              {t("localModel.currentModel")}:
+            </span>
             <span className="font-medium">{status.modelName ?? "—"}</span>
-            <span className="text-muted-foreground">{t("localModel.baseUrl")}:</span>
+            <span className="text-muted-foreground">
+              {t("localModel.baseUrl")}:
+            </span>
             <code className="font-mono text-xs bg-muted px-1.5 py-0.5 rounded">
               {status.baseUrl}
             </code>
@@ -313,7 +342,12 @@ export function LocalModelPage() {
               <FolderPlus className="w-4 h-4 mr-1.5" />
               {t("localModel.addRoot")}
             </Button>
-            <Button variant="outline" size="sm" onClick={handleRescan} disabled={scanning}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleRescan}
+              disabled={scanning}
+            >
               {scanning ? (
                 <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
               ) : (
@@ -371,7 +405,9 @@ export function LocalModelPage() {
                       disabled={busy || busyState}
                       onClick={() => void handleStart(model.path)}
                     >
-                      {isCurrent ? t("localModel.restart") : t("localModel.use")}
+                      {isCurrent
+                        ? t("localModel.restart")
+                        : t("localModel.use")}
                     </Button>
                     <Button
                       variant="ghost"
@@ -394,107 +430,109 @@ export function LocalModelPage() {
       {portSettings && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">{t("localModel.settings")}</CardTitle>
+            <CardTitle className="text-base">
+              {t("localModel.settings")}
+            </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-4 max-w-md">
-              <div className="space-y-1.5">
-                <Label>{t("localModel.backend")}</Label>
-                <Select
-                  value={portSettings.backend ?? "mlx"}
-                  onValueChange={(v) =>
-                    setPortSettings({ ...portSettings, backend: v })
-                  }
-                >
-                  <SelectTrigger className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="mlx">
-                      {t("localModel.backendMlx")}
-                    </SelectItem>
-                    <SelectItem value="ollama">
-                      {t("localModel.backendOllama")}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">
-                  {t("localModel.backendHint")}
-                </p>
-              </div>
-              {portSettings.backend === "ollama" && (
+              <div className="grid grid-cols-2 gap-4 max-w-md">
                 <div className="space-y-1.5">
-                  <Label htmlFor="ollama-model">
-                    {t("localModel.ollamaModel")}
-                  </Label>
+                  <Label>{t("localModel.backend")}</Label>
+                  <Select
+                    value={portSettings.backend ?? "mlx"}
+                    onValueChange={(v) =>
+                      setPortSettings({ ...portSettings, backend: v })
+                    }
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="mlx">
+                        {t("localModel.backendMlx")}
+                      </SelectItem>
+                      <SelectItem value="ollama">
+                        {t("localModel.backendOllama")}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    {t("localModel.backendHint")}
+                  </p>
+                </div>
+                {portSettings.backend === "ollama" && (
+                  <div className="space-y-1.5">
+                    <Label htmlFor="ollama-model">
+                      {t("localModel.ollamaModel")}
+                    </Label>
+                    <Input
+                      id="ollama-model"
+                      value={portSettings.ollama_model}
+                      placeholder="qwen3.8:27b-mtp-q4_K_M"
+                      onChange={(e) =>
+                        setPortSettings({
+                          ...portSettings,
+                          ollama_model: e.target.value,
+                        })
+                      }
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {t("localModel.ollamaModelHint")}
+                    </p>
+                  </div>
+                )}
+                <div className="space-y-1.5">
+                  <Label htmlFor="mlx-port">{t("localModel.mlxPort")}</Label>
                   <Input
-                    id="ollama-model"
-                    value={portSettings.ollama_model}
-                    placeholder="qwen3.8:27b-mtp-q4_K_M"
+                    id="mlx-port"
+                    type="number"
+                    value={portSettings.mlx_port}
+                    min={1024}
+                    max={65535}
                     onChange={(e) =>
                       setPortSettings({
                         ...portSettings,
-                        ollama_model: e.target.value,
+                        mlx_port: Number(e.target.value),
                       })
                     }
                   />
                   <p className="text-xs text-muted-foreground">
-                    {t("localModel.ollamaModelHint")}
+                    {t("localModel.mlxPortHint")}
                   </p>
                 </div>
-              )}
-              <div className="space-y-1.5">
-                <Label htmlFor="mlx-port">{t("localModel.mlxPort")}</Label>
-                <Input
-                  id="mlx-port"
-                  type="number"
-                  value={portSettings.mlx_port}
-                  min={1024}
-                  max={65535}
-                  onChange={(e) =>
-                    setPortSettings({
-                      ...portSettings,
-                      mlx_port: Number(e.target.value),
-                    })
-                  }
-                />
-                <p className="text-xs text-muted-foreground">
-                  {t("localModel.mlxPortHint")}
-                </p>
+                <div className="space-y-1.5">
+                  <Label htmlFor="gw-port">{t("localModel.gatewayPort")}</Label>
+                  <Input
+                    id="gw-port"
+                    type="number"
+                    value={portSettings.gateway_port}
+                    min={1024}
+                    max={65535}
+                    onChange={(e) =>
+                      setPortSettings({
+                        ...portSettings,
+                        gateway_port: Number(e.target.value),
+                      })
+                    }
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t("localModel.gatewayPortHint")}
+                  </p>
+                </div>
               </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="gw-port">{t("localModel.gatewayPort")}</Label>
-                <Input
-                  id="gw-port"
-                  type="number"
-                  value={portSettings.gateway_port}
-                  min={1024}
-                  max={65535}
-                  onChange={(e) =>
-                    setPortSettings({
-                      ...portSettings,
-                      gateway_port: Number(e.target.value),
-                    })
-                  }
-                />
-                <p className="text-xs text-muted-foreground">
-                  {t("localModel.gatewayPortHint")}
-                </p>
+              <div className="mt-3 flex items-center gap-3">
+                <Button
+                  size="sm"
+                  onClick={handleSavePorts}
+                  disabled={savingPorts}
+                >
+                  {t("common.save")}
+                </Button>
+                <span className="text-xs text-muted-foreground">
+                  {t("localModel.portRestartHint")}
+                </span>
               </div>
-            </div>
-            <div className="mt-3 flex items-center gap-3">
-              <Button
-                size="sm"
-                onClick={handleSavePorts}
-                disabled={savingPorts}
-              >
-                {t("common.save")}
-              </Button>
-              <span className="text-xs text-muted-foreground">
-                {t("localModel.portRestartHint")}
-              </span>
-            </div>
             </div>
           </CardContent>
         </Card>
@@ -523,30 +561,50 @@ export function LocalModelPage() {
               <div className="flex flex-wrap gap-x-6 gap-y-1">
                 <span>
                   {t("localModel.debug.gateway")}:{" "}
-                  <span className={diag.gatewayHealthy ? "text-green-600" : "text-red-500"}>
+                  <span
+                    className={
+                      diag.gatewayHealthy ? "text-green-600" : "text-red-500"
+                    }
+                  >
                     {diag.gatewayHealthy ? "OK" : "DOWN"}
                   </span>
                 </span>
                 <span>
                   {t("localModel.debug.mlx")}:{" "}
-                  <span className={diag.mlxHealthy ? "text-green-600" : "text-red-500"}>
+                  <span
+                    className={
+                      diag.mlxHealthy ? "text-green-600" : "text-red-500"
+                    }
+                  >
                     {diag.mlxHealthy ? "OK" : "DOWN"}
                   </span>
                 </span>
                 {diag.metrics && (
                   <>
-                    <span>{t("localModel.debug.total")}: {diag.metrics.totalRequests}</span>
+                    <span>
+                      {t("localModel.debug.total")}:{" "}
+                      {diag.metrics.totalRequests}
+                    </span>
                     <span className="text-emerald-600">
-                      {t("localModel.debug.completed")}: {diag.metrics.completedRequests}
+                      {t("localModel.debug.completed")}:{" "}
+                      {diag.metrics.completedRequests}
                     </span>
                     <span className="text-red-500">
-                      {t("localModel.debug.failed")}: {diag.metrics.failedRequests}
+                      {t("localModel.debug.failed")}:{" "}
+                      {diag.metrics.failedRequests}
                     </span>
                     <span className="text-amber-500">
-                      {t("localModel.debug.active")}: {diag.metrics.activeRequests}
+                      {t("localModel.debug.active")}:{" "}
+                      {diag.metrics.activeRequests}
                     </span>
-                    <span>{t("localModel.debug.recv")}: {formatBytes(diag.metrics.requestBytesReceived)}</span>
-                    <span>{t("localModel.debug.sent")}: {formatBytes(diag.metrics.responseBytesSent)}</span>
+                    <span>
+                      {t("localModel.debug.recv")}:{" "}
+                      {formatBytes(diag.metrics.requestBytesReceived)}
+                    </span>
+                    <span>
+                      {t("localModel.debug.sent")}:{" "}
+                      {formatBytes(diag.metrics.responseBytesSent)}
+                    </span>
                   </>
                 )}
                 {!diag.metrics && diag.gatewayHealthy && (
@@ -560,16 +618,28 @@ export function LocalModelPage() {
               {diag.metrics && diag.metrics.active.length > 0 && (
                 <div className="rounded border border-amber-500/30 bg-amber-500/5 p-2 space-y-1">
                   {diag.metrics.active.map((req) => (
-                    <div key={req.id} className="text-xs flex flex-wrap gap-x-4 gap-y-0.5">
+                    <div
+                      key={req.id}
+                      className="text-xs flex flex-wrap gap-x-4 gap-y-0.5"
+                    >
                       <span className="font-mono">#{req.id}</span>
-                      <span>{req.protocol}{req.streaming ? " · stream" : ""}</span>
-                      <span className="text-amber-600">
-                        {t("localModel.debug.elapsed")} {Math.round(req.elapsedSeconds ?? 0)}s
+                      <span>
+                        {req.protocol}
+                        {req.streaming ? " · stream" : ""}
                       </span>
-                      <span>{t("localModel.debug.reqBytes")}: {formatBytes(req.requestBytes ?? 0)}</span>
+                      <span className="text-amber-600">
+                        {t("localModel.debug.elapsed")}{" "}
+                        {Math.round(req.elapsedSeconds ?? 0)}s
+                      </span>
+                      <span>
+                        {t("localModel.debug.reqBytes")}:{" "}
+                        {formatBytes(req.requestBytes ?? 0)}
+                      </span>
                       <span className="text-muted-foreground">
-                        {t("localModel.debug.respBytes")}: {formatBytes(req.responseBytes ?? 0)}
-                        {req.responseBytes === 0 && ` · ${t("localModel.debug.waitingPrefill")}`}
+                        {t("localModel.debug.respBytes")}:{" "}
+                        {formatBytes(req.responseBytes ?? 0)}
+                        {req.responseBytes === 0 &&
+                          ` · ${t("localModel.debug.waitingPrefill")}`}
                       </span>
                     </div>
                   ))}
@@ -582,11 +652,15 @@ export function LocalModelPage() {
               {/* 最近日志（服务侧输出） */}
               <div className="h-32 overflow-y-auto rounded bg-black/80 text-green-300/80 text-xs font-mono p-2 space-y-0.5">
                 {diag.recentLogs.length === 0 ? (
-                  <span className="opacity-50">{t("localModel.debug.noLogs")}</span>
+                  <span className="opacity-50">
+                    {t("localModel.debug.noLogs")}
+                  </span>
                 ) : (
                   diag.recentLogs.slice(-30).map((entry) => (
                     <div key={entry.id} className="truncate">
-                      <span className="opacity-50 mr-2">{new Date(entry.ts).toLocaleTimeString()}</span>
+                      <span className="opacity-50 mr-2">
+                        {new Date(entry.ts).toLocaleTimeString()}
+                      </span>
                       <span className="opacity-60 mr-2">[{entry.source}]</span>
                       {entry.line}
                     </div>
@@ -601,7 +675,9 @@ export function LocalModelPage() {
       {/* 活动日志 */}
       <Card>
         <CardHeader className="flex-row items-center justify-between">
-          <CardTitle className="text-base">{t("localModel.activity")}</CardTitle>
+          <CardTitle className="text-base">
+            {t("localModel.activity")}
+          </CardTitle>
           <Button
             variant="ghost"
             size="sm"
@@ -620,15 +696,20 @@ export function LocalModelPage() {
             className="h-56 overflow-y-auto rounded bg-black/90 text-muted-foreground text-xs font-mono p-3 space-y-0.5"
           >
             {logs.length === 0 ? (
-              <div className="text-muted-foreground/60">{t("localModel.noLogs")}</div>
+              <div className="text-muted-foreground/60">
+                {t("localModel.noLogs")}
+              </div>
             ) : (
               logs.map((entry) => (
-                <div key={entry.id} className={cn(
-                  entry.level === "error" && "text-red-400",
-                  entry.level === "warn" && "text-amber-400",
-                  entry.source === "mlx-err" && "text-orange-300",
-                  entry.source === "gateway-err" && "text-orange-300",
-                )}>
+                <div
+                  key={entry.id}
+                  className={cn(
+                    entry.level === "error" && "text-red-400",
+                    entry.level === "warn" && "text-amber-400",
+                    entry.source === "mlx-err" && "text-orange-300",
+                    entry.source === "gateway-err" && "text-orange-300",
+                  )}
+                >
                   <span className="opacity-50 mr-2">{formatTs(entry.ts)}</span>
                   <span className="opacity-70 mr-2">[{entry.source}]</span>
                   {entry.line}
